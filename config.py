@@ -22,9 +22,9 @@ class Config:
     latency_seconds: float = 0.14  # P：视觉延迟
 
     N: int = 35  # 留出 S1,...,SN；每折用其余全部被试训练
-    M: int = 3  # 每折独立训练次数；多种子是用户要求的扩展
-    seed: int = 2026  # P：起始种子；使用 seed,...,seed+M-1
-    windows_ms: tuple = (500, 600, 700, 800, 900, 1000)  # P：整数毫秒避免浮点截断
+    M: int = 1  # 每折独立训练次数；多种子是用户要求的扩展
+    seed: int = 42  # P：起始种子；使用 seed,...,seed+M-1
+    windows_ms: tuple = (1000,)  # P：整数毫秒避免浮点截断
     epochs: int = 100  # P：固定训练轮数，最终 epoch 测试
     batch_size: int = 128  # P：训练批量
     learning_rate: float = 0.001  # P：Adam 学习率，不使用调度器
@@ -69,13 +69,13 @@ class Config:
     variance_ddof: int = 0  # 用户要求方差，不是标准差；默认总体方差
     device: str = "cuda:0"  # 训练：auto/cpu/cuda/cuda:0/cuda:1；auto 优先使用 gpu_ids 中可用卡
     gpu_ids: tuple = (0, 1)  # auto/cuda 时，一张卡一个独立任务进程；单卡可设为 (0,)
-    evaluation_device: str = "auto"  # 独立 evaluate.py：auto/cpu/cuda:0/cuda:1；训练后的测试跟随任务设备
+    evaluation_device: str = "cuda:0"  # 独立 evaluate.py：auto/cpu/cuda:0/cuda:1；训练后的测试跟随任务设备
     num_workers: int = 0  # 可调 DataLoader 进程数；Windows 安全默认
     cpu_threads: int = 4  # CPU 运算线程数
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
     cache_root: Path = PROJECT_ROOT / "cache"  # 仅一个可复用预处理缓存文件
-    output_root: Path = PROJECT_ROOT / "runs"  # 正式实验输出
-    experiment_name: str = "benchmark_spiketfnet_v1"  # 已存在时拒绝覆盖
+    output_root: Path = PROJECT_ROOT / "results"  # 正式实验输出
+    experiment_name: str = "spiketfnet"  # 已存在时拒绝覆盖
     probe_trials: int = 4  # 保存供未来效率测量使用的代表性输入数量
 
     @property
