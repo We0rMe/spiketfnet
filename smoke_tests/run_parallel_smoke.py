@@ -1,6 +1,7 @@
 """用两个真实 CPU spawn 进程验证调度、隔离及串行一致性，不代替 GPU 验证。"""
 
 import io
+import csv
 import json
 import os
 import sys
@@ -37,7 +38,7 @@ def main():
 
     cfg = replace(CONFIG, data_root=Path(r"G:\SSVEP\data\benchmark"), subject_ids=(1, 2, 3),
                   N=2, M=2, seed=42, windows_ms=(500,), epochs=2, batch_size=8,
-                  device="cpu", evaluation_device="cpu", num_workers=0, cpu_threads=2,
+                  device="cpu", evaluation_device="cpu", resume=False, num_workers=0, cpu_threads=2,
                   cache_root=base.parent / "cache", output_root=base, experiment_name="serial")
     prepared = prepare_data(cfg)
     rows = np.flatnonzero((prepared.ids[:, 1] == 1) & (prepared.ids[:, 2] % 5 == 0))
@@ -56,8 +57,12 @@ def main():
         pids.add(provenance["worker_pid"])
         assert provenance["status"] == "complete"
         assert provenance["test_subject"] not in provenance["training_subjects"]
-        for name in ("metrics.json", "details/history.csv"):
+        for name in ("metrics.json",):
             assert (folder / name).read_bytes() == (reference / name).read_bytes()
+        with (folder / "details/history.csv").open() as actual, (reference / "details/history.csv").open() as expected:
+            actual_rows, expected_rows = list(csv.DictReader(actual)), list(csv.DictReader(expected))
+        for a, b in zip(actual_rows, expected_rows):
+            assert all(a[key] == b[key] for key in ("epoch", "loss", "train_acc_percent"))
         with np.load(folder / "details" / "evaluation.npz") as actual, np.load(reference / "details" / "evaluation.npz") as expected:
             assert set(actual.files) == set(expected.files)
             for name in actual.files:

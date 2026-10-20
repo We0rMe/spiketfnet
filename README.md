@@ -20,16 +20,19 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 ```python
 data_root = Path("/your/server/benchmark")
 N = 35                    # 测试被试依次 S1,...,SN
-M = 3                     # 每折独立训练 3 次
-seed = 42                 # 种子 42、43、44
+M = 1                     # 当前先做单种子；改为 3 时使用 42、43、44
+seed = 42                 # 起始种子
+windows_ms = (1000,)       # 当前只训练 1000 ms
 simulation_steps = 4       # Ts，可以修改
 device = "cuda"           # 训练设备：cuda 使用下列 GPU 池；auto 允许 CPU 回落
 gpu_ids = (0, 1)           # 两张 GPU 各运行一个独立训练任务
 evaluation_device = "cuda:0"  # 单独运行 evaluate.py 时使用的设备
-experiment_name = "benchmark_spiketfnet_v1"
+resume = True             # 同名实验恢复；完成的任务自动跳过
+check_gradients = False   # 正式训练关闭逐 batch 全梯度扫描
+experiment_name = "spiketfnet"
 ```
 
-N 只限制测试折数。即使 N=1，正式训练仍用除 S1 外的全部 34 名被试，不能把源被试池缩小为 N 个人。默认完整任务为 6 个窗口 × 35 折 × 3 种子 = 630 次独立训练。调试服务器配置时可先设 N=1、M=1、`windows_ms=(500,)`；不要把这种子集成绩当成完整 LOSO 结果。
+N 只限制测试折数。即使 N=1，正式训练仍用除 S1 外的全部 34 名被试，不能把源被试池缩小为 N 个人。当前单窗口、35 折、单种子共 35 个独立模型；扩展到 6 个窗口 × 35 折 × 3 种子时共 630 个模型。调试服务器配置时可先设 N=1、M=1、`windows_ms=(500,)`，另起实验名称；不要把这种子集成绩当成完整 LOSO 结果。
 
 服务器建议 Python 3.9–3.12（本地已测试 3.12）。`requirements.txt` 固定 PyTorch 2.5.1 / torchvision 0.20.1 的 CUDA 12.1 构建，需要兼容的 NVIDIA 驱动。构建对应关系见 [PyTorch 官方历史版本说明](https://pytorch.org/get-started/previous-versions/)。Linux 服务器安装和启动：
 
@@ -46,8 +49,8 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 | 配置 | 运行方式 |
 | --- | --- |
-| `device="auto", gpu_ids=(0, 1)`（默认） | 使用池中可见的 GPU；一张卡时单卡，没有 CUDA 时 CPU |
-| `device="cuda", gpu_ids=(0, 1)` | 要求两张卡均可用，否则立即报错 |
+| `device="auto", gpu_ids=(0, 1)` | 使用池中可见的 GPU；一张卡时单卡，没有 CUDA 时 CPU |
+| `device="cuda", gpu_ids=(0, 1)`（当前配置） | 要求两张卡均可用，否则报错 |
 | `device="cuda:1"` | 仅使用编号 1 的卡；此时忽略 GPU 池 |
 | `device="cpu"` | CPU 串行训练 |
 | `evaluation_device="auto"/"cpu"/"cuda:0"/"cuda:1"` | 控制单独启动的 `evaluate.py`，一次用一张卡 |
@@ -60,12 +63,26 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 使用 `python evaluate.py` 可重新评估 `output_root / experiment_name` 下所有最终 checkpoint。模型结构和预处理设置读取训练时快照；当前配置仅提供实验位置、数据根路径与运行设备。重新评估覆盖同一份评估文件，不再创建一套重复指标。代码/原数据变化会触发一致性检查。
 
-已存在的实验目录会被拒绝覆盖。更改 `experiment_name` 可启动新实验。本版本不实现中断训练恢复，只保存完成轮次的唯一最终 checkpoint；失败信息保存在该实验 `details/experiment.json` 中。
+`resume=True` 时，同名实验自动恢复；`resume=False` 时拒绝使用已有目录。更改 `experiment_name` 可启动全新实验。新版本通过文件锁阻止两个训练主进程同时写同一实验；旧版本没有此锁，升级前必须先停止旧训练并确认子进程退出。
+
+## 耗时和恢复
+
+每个 epoch 输出一行，包含设备、窗口、测试被试、种子、loss、训练 ACC、`train`、`save`、`total` 秒数。`train` 在 CUDA 同步后计时，涵盖 DataLoader、传输、前反向和优化；`save` 是 checkpoint 与历史写盘时间，`total` 为两者合计，不包括初始预处理及最终测试。`details/history.csv` 增加 `train_seconds`，不单独创建计时文件。
+
+每个任务开始时保存 epoch 0，之后每个完整 epoch 原子替换 `details/resume.pt`。该文件包含模型、Adam 状态、epoch、训练历史、Python/NumPy/Torch/CUDA 随机状态和 DataLoader 的打乱生成器状态。中途停止后，执行同一条 `python train.py` 即从最后成功保存的 epoch 后继续；当前未保存的 epoch 会重做。最终测试成功后删除恢复文件，只保留 `model.pt`。checkpoint 是恢复用途，测试仍只使用固定最后一轮模型。
+
+恢复会校验数据指纹、trial 身份、模型/预处理和训练设置。可调整 N、M、起始 seed 和设备分配；学习率、batch size、epoch 总数、网络参数、确定性设置变化必须使用新实验名。窗口修改仍要求预处理指纹一致。新格式还校验训练与评估代码哈希；环境或 CPU/CUDA 后端变化不保证逐位相同，运行环境会记入恢复记录。
+
+从旧版升级时，完整任务会核验并复用；旧版中途任务没有权重时会明确打印 `no saved weights; restart from epoch 1`，把原曲线留到 `details/history_before_restart.csv` 后重训。旧版若已经写出末轮权重而测试中断，则只补完测试。旧版未保存的中途参数无法恢复。原始源码快照保留，恢复时执行的源码放在 `details/source_resume/`，变更配置及环境记录在原 `experiment.json` 中。
+
+从 M=3 改为 M=1 时，保持起始 seed 不变即可只运行/统计该种子。已完成的该种子任务会跳过，其他种子的目录保留但不参与汇总；程序在恢复期间移除旧范围的 `summary.csv`，成功后重新生成。M=1 的跨重复方差为 0，仅表示没有独立重复，不能作为稳定性证据。
+
+本轮性能检查发现：旧版逐 batch 扫描全部梯度、读取 loss/ACC 标量会产生额外 GPU 操作和同步。现在把梯度扫描设为调试开关，loss/ACC 在设备上累计至 epoch 末，再读取一次；保留逐 batch loss 有限性检查，并在 epoch 末检查全部参数。数据传输使用 `non_blocking=True`；测试的脉冲计数也在设备上累计，最后回传。该方向与 [PyTorch 性能指南](https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html) 一致，实际收益需在服务器计时。模型结构、FP32、Ts=4、batch size 和确定性设置未改变，逐仿真步的脉冲计算仍有开销。
 
 ## 输出
 
 ```text
-runs/benchmark_spiketfnet_v1/
+results/spiketfnet/
   summary.csv                         # 唯一汇总表，包含“均值 ± 方差”列
   details/
     experiment.json                   # 配置、版本、用途、状态、代码哈希
@@ -76,7 +93,8 @@ runs/benchmark_spiketfnet_v1/
     training.png                      # 一张图：训练联合损失与训练 ACC
     details/
       model.pt                        # 固定最后一轮的权重
-      history.csv                     # 训练曲线的唯一原始数据
+      history.csv                     # 训练曲线及每 epoch 训练秒数
+      resume.pt                       # 训练中滚动覆盖；最终评估成功后删除
       provenance.json                 # 测试/训练被试、种子与完成状态
       evaluation.npz                  # 预测、身份、特征、脉冲计数及测量用输入
 ```
@@ -104,6 +122,7 @@ runs/benchmark_spiketfnet_v1/
 .\.venv\Scripts\python.exe -m pip install -r smoke_tests\requirements.txt
 .\.venv\Scripts\python.exe smoke_tests\run_smoke.py
 .\.venv\Scripts\python.exe smoke_tests\run_parallel_smoke.py
+.\.venv\Scripts\python.exe smoke_tests\run_resume_smoke.py
 ```
 
 所有临时缓存、报告、训练及评估结果都进入 `smoke_tests/results/`。脚本先做数值与隔离检查，再对真实 S1–S3 数据进行预处理；集成部分取每人 8 个 trial、S1/S2 两折、42/43 两个种子、每次 2 epochs。完整网络尺寸、40 类输出和 Ts=4 保持不变；六个窗口另做形状检查。最后加载四个 checkpoint 重评估，确认 logits 和汇总完全一致。
@@ -111,3 +130,5 @@ runs/benchmark_spiketfnet_v1/
 集成目录已存在时会拒绝覆盖；需要重跑时先自行移走旧 `smoke_tests/results/integration/`。这些低轮数、小样本成绩仅验证软件流程，不能用于评价论文复现性能。`.gitignore` 已排除 `.venv`、缓存、正式和冒烟结果、原始 MAT 与 PDF。
 
 `run_parallel_smoke.py` 的脚本与结果同样位于冒烟目录，结果写入 `smoke_tests/results/parallel_device_check/`，已存在时拒绝覆盖。它检查设备选择和任务完整性，并对真实数据小子集分别执行串行训练、两个 CPU `spawn` 进程并行训练，核对全部权重、训练历史、预测与汇总，再重放 checkpoint。本机 CPU 测试验证并行流程，不代表实际双 GPU 测试已完成。两个冒烟脚本均显式指定本地数据路径和 CPU，不继承服务器的设备设置。
+
+`run_resume_smoke.py` 输出到 `smoke_tests/results/resume_check/`，模拟第 1 个 epoch 后中断，再以两个 CPU 进程恢复，比较权重、训练指标、预测和汇总（计时值不要求相同）。另验证完成任务跳过、M 缩减、旧版任务升级、写盘失败保留前一 checkpoint 及并发锁。所有冒烟结果均不作为 GPU 速度或正式复现性能依据。

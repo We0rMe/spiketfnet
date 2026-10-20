@@ -1,12 +1,15 @@
 """固定末轮 checkpoint 的 LOSO 训练；每折 M 个独立连续种子。"""
 
 import csv
+import hashlib
 import importlib.metadata
 import json
 import os
 import platform
 import random
 import shutil
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,7 +18,7 @@ import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, Subset
 
-from config import CONFIG, PROJECT_ROOT
+from config import CONFIG, PROJECT_ROOT, Config
 from data import WindowDataset, file_sha256, loso_indices, prepare_data
 from evaluate import evaluate_model, resolve_device, run_path, save_evaluation, summarize_experiment, write_json
 from model import SpikeTFNet, joint_loss
@@ -49,25 +52,32 @@ def environment_info(device):
 
 def train_epoch(model, loader, optimizer, cfg, device):
     model.train()
-    total_loss, correct, count = 0.0, 0, 0
+    total_loss = torch.zeros((), dtype=torch.float64, device=device)
+    correct = torch.zeros((), dtype=torch.long, device=device)
+    count = 0
     for time, spectrum, labels in loader:
-        time, spectrum, labels = time.to(device), spectrum.to(device), labels.to(device)
+        time, spectrum, labels = (value.to(device, non_blocking=True) for value in (time, spectrum, labels))
         optimizer.zero_grad(set_to_none=True)
         outputs = model(time, spectrum)
         loss = joint_loss(outputs, labels, cfg)
         if not torch.isfinite(loss):
             raise FloatingPointError("Nonfinite training loss")
         loss.backward()
-        finite_gradients = torch.stack([torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None]).all()
-        if not finite_gradients:
-            raise FloatingPointError("Nonfinite training gradients")
+        if cfg.check_gradients:
+            finite_gradients = torch.stack([torch.isfinite(p.grad).all() for p in model.parameters()
+                                            if p.grad is not None]).all()
+            if not finite_gradients:
+                raise FloatingPointError("Nonfinite training gradients")
         optimizer.step()
-        total_loss += loss.item() * len(labels)
-        correct += int((outputs["logits"].argmax(1) == labels).sum().item())
+        total_loss += loss.detach().double() * len(labels)
+        correct += (outputs["logits"].argmax(1) == labels).sum()
         count += len(labels)
     if count == 0:
         raise ValueError("Empty training loader")
-    return {"loss": total_loss / count, "train_acc_percent": 100 * correct / count}
+    finite_parameters = torch.stack([torch.isfinite(p).all() for p in model.parameters()]).all()
+    if not finite_parameters:
+        raise FloatingPointError("Nonfinite model parameters at epoch end")
+    return {"loss": total_loss.item() / count, "train_acc_percent": 100 * correct.item() / count}
 
 
 def plot_history(history, destination, title):
@@ -115,13 +125,79 @@ def partition_jobs(jobs, rank, workers):
     return jobs[rank::workers]
 
 
+def atomic_torch_save(payload, destination):
+    destination = Path(destination)
+    temporary = destination.with_suffix(".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(destination)
+
+
+def rng_state(generator, device):
+    numpy_state = np.random.get_state()
+    return {"python": random.getstate(),
+            "numpy": (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
+            "torch": torch.get_rng_state(), "loader": generator.get_state(),
+            "cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None}
+
+
+def restore_rng(state, generator, device):
+    random.setstate(state["python"])
+    numpy_state = state["numpy"]
+    np.random.set_state((numpy_state[0], np.asarray(numpy_state[1], dtype=np.uint32), *numpy_state[2:]))
+    torch.set_rng_state(state["torch"])
+    generator.set_state(state["loader"])
+    if device.type == "cuda" and state["cuda"] is not None:
+        torch.cuda.set_rng_state(state["cuda"], device)
+    elif (device.type == "cuda") != (state["cuda"] is not None):
+        print("Resume changed CPU/CUDA backend; bitwise reproducibility is not guaranteed.", flush=True)
+
+
+def write_history(path, history):
+    with path.with_suffix(".tmp").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=("epoch", "loss", "train_acc_percent", "train_seconds"))
+        writer.writeheader()
+        writer.writerows(history)
+    path.with_suffix(".tmp").replace(path)
+
+
+def save_resume(path, model, optimizer, generator, device, history, job, prepared):
+    # 膜电位在 forward 后已重置；保存 epoch 边界可恢复的随机数和数据顺序。
+    atomic_torch_save({"format_version": 1, "job": job, "epoch": len(history), "history": history,
+                       "dataset_fingerprint": prepared.metadata["fingerprint"],
+                       "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                       "rng": rng_state(generator, device)}, path)
+
+
+def completed_job(folder, job, prepared, cfg):
+    private = folder / "details"
+    provenance_file = private / "provenance.json"
+    if not provenance_file.exists():
+        return False
+    provenance = json.loads(provenance_file.read_text(encoding="utf-8"))
+    if (provenance["window_ms"], provenance["test_subject"], provenance["seed"]) != job:
+        raise ValueError(f"Run identity mismatch: {folder}")
+    if provenance["status"] != "complete":
+        return False
+    required = ("model.pt", "history.csv", "evaluation.npz")
+    if not all((private / name).is_file() for name in required) or not all(
+            (folder / name).is_file() for name in ("metrics.json", "training.png")):
+        raise ValueError(f"Completed run has missing files: {folder}")
+    training_rows, test_rows = loso_indices(prepared.ids, job[1], cfg.subject_ids)
+    with np.load(private / "evaluation.npz", allow_pickle=False) as arrays:
+        if not np.array_equal(arrays["training_ids"], prepared.ids[training_rows]) or not np.array_equal(
+                arrays["test_ids"], prepared.ids[test_rows]):
+            raise ValueError(f"Completed run has a different LOSO split: {folder}")
+    return True
+
+
 def train_run(cfg, prepared, dataset, job, device, root, purpose):
     window, subject, seed = job
     training_rows, test_rows = loso_indices(prepared.ids, subject, cfg.subject_ids)
     seed_everything(seed, cfg)
     folder = run_path(root, window, subject, seed)
     private = folder / "details"
-    private.mkdir(parents=True, exist_ok=False)
+    private.mkdir(parents=True, exist_ok=True)
+    resume_file = private / "resume.pt"
     provenance = {"status": "training", "purpose": purpose, "test_subject": subject,
                   "training_subjects": sorted(set(prepared.ids[training_rows, 0].tolist())),
                   "seed": seed, "window_ms": window, "epochs": cfg.epochs,
@@ -136,24 +212,69 @@ def train_run(cfg, prepared, dataset, job, device, root, purpose):
     model = SpikeTFNet(cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     history = []
-    with (private / "history.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=("epoch", "loss", "train_acc_percent"))
-        writer.writeheader()
-        for epoch in range(1, cfg.epochs + 1):
-            row = {"epoch": epoch, **train_epoch(model, train_loader, optimizer, cfg, device)}
-            history.append(row)
-            writer.writerow(row)
-            handle.flush()
-            if epoch == 1 or epoch % 10 == 0 or epoch == cfg.epochs:
-                print(f"[{device}] {window}ms S{subject:02d} seed={seed} epoch={epoch}/{cfg.epochs} "
-                      f"loss={row['loss']:.4f} train_ACC={row['train_acc_percent']:.2f}%", flush=True)
-    # 不保存每轮 checkpoint；测试只接触固定末轮权重。
-    torch.save(model.state_dict(), private / "model.pt")
-    plot_history(history, folder / "training.png", f"{window} ms | test S{subject:02d} | seed {seed} | {purpose}")
-    metrics, arrays = evaluate_model(model, test_loader, cfg, window, device)
-    save_evaluation(folder, metrics, arrays, prepared.ids[training_rows], prepared.ids[test_rows])
-    provenance["status"] = "complete"
+    if resume_file.exists():
+        state = torch.load(resume_file, map_location="cpu", weights_only=True)
+        if state["format_version"] != 1 or tuple(state["job"]) != job or state[
+                "dataset_fingerprint"] != prepared.metadata["fingerprint"]:
+            raise ValueError(f"Resume checkpoint identity mismatch: {resume_file}")
+        history = state["history"]
+        if state["epoch"] != len(history) or [row["epoch"] for row in history] != list(range(1, len(history) + 1)):
+            raise ValueError("Resume history does not match the checkpoint epoch")
+        if len(history) > cfg.epochs:
+            raise ValueError("Checkpoint exceeds configured epochs")
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        restore_rng(state["rng"], generator, device)
+        del state
+        print(f"[{device}] {window}ms S{subject:02d} seed={seed}: resume after epoch {len(history)}", flush=True)
+    elif (private / "model.pt").exists():
+        # 兼容旧版：已写出末轮权重但测试/绘图中断，仅补完评估。
+        model.load_state_dict(torch.load(private / "model.pt", map_location=device, weights_only=True))
+        with (private / "history.csv").open(newline="", encoding="utf-8") as handle:
+            history = [{"epoch": int(row["epoch"]), "loss": float(row["loss"]),
+                        "train_acc_percent": float(row["train_acc_percent"]),
+                        "train_seconds": float(row["train_seconds"]) if row.get("train_seconds") else None}
+                       for row in csv.DictReader(handle)]
+        if [row["epoch"] for row in history] != list(range(1, cfg.epochs + 1)):
+            raise ValueError("Final model has no matching full training history")
+        print(f"[{device}] S{subject:02d} seed={seed}: final weights found; finishing evaluation only", flush=True)
+    else:
+        if (private / "history.csv").exists():
+            shutil.copy2(private / "history.csv", private / "history_before_restart.csv")
+            print(f"[{device}] S{subject:02d} seed={seed}: no saved weights; restart from epoch 1", flush=True)
+        save_resume(resume_file, model, optimizer, generator, device, history, job, prepared)
+    write_history(private / "history.csv", history)
+    provenance["resumed_after_epoch"] = len(history)
     write_json(private / "provenance.json", provenance)
+    try:
+        for epoch in range(len(history) + 1, cfg.epochs + 1):
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            started = time.perf_counter()
+            row = {"epoch": epoch, **train_epoch(model, train_loader, optimizer, cfg, device)}
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            row["train_seconds"] = time.perf_counter() - started
+            history.append(row)
+            saved_at = time.perf_counter()
+            save_resume(resume_file, model, optimizer, generator, device, history, job, prepared)
+            write_history(private / "history.csv", history)
+            print(f"[{device}] {window}ms S{subject:02d} seed={seed} epoch={epoch}/{cfg.epochs} "
+                  f"loss={row['loss']:.4f} train_ACC={row['train_acc_percent']:.2f}% "
+                  f"train={row['train_seconds']:.2f}s save={time.perf_counter() - saved_at:.2f}s "
+                  f"total={time.perf_counter() - started:.2f}s", flush=True)
+        atomic_torch_save(model.state_dict(), private / "model.pt")
+        plot_history(history, folder / "training.png", f"{window} ms | test S{subject:02d} | seed {seed} | {purpose}")
+        metrics, arrays = evaluate_model(model, test_loader, cfg, window, device)
+        save_evaluation(folder, metrics, arrays, prepared.ids[training_rows], prepared.ids[test_rows])
+        provenance["status"] = "complete"
+        write_json(private / "provenance.json", provenance)
+        resume_file.unlink(missing_ok=True)
+    except BaseException as exc:
+        provenance.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                          error=f"{type(exc).__name__}: {exc}")
+        write_json(private / "provenance.json", provenance)
+        raise
     print(f"[{device}] {window}ms S{subject:02d} seed={seed} final test: "
           f"ACC={metrics['acc_percent']:.2f}%, ITR={metrics['itr_bits_per_minute']:.2f} bits/min", flush=True)
     del model, optimizer, arrays
@@ -174,13 +295,71 @@ def train_worker(rank, devices, cfg, prepared, root, purpose, jobs):
 
 
 def execute_jobs(devices, cfg, prepared, root, purpose, jobs):
+    if not jobs:
+        return
     names = [str(device) for device in devices]
     args = (names, cfg, prepared, root, purpose, jobs)
     if len(names) == 1:
         train_worker(0, *args)
     else:
-        # spawn 隔离 CUDA、BN 和 LIF 状态；子进程失败时由 PyTorch 终止其余 worker。
-        mp.spawn(train_worker, args=args, nprocs=len(names), join=True)
+        context = mp.spawn(train_worker, args=args, nprocs=len(names), join=False)
+        try:
+            while not context.join():
+                pass
+        except BaseException:
+            # 父进程 Ctrl+C 时也清理所有训练子进程，避免它们继续写同一实验。
+            for process in context.processes:
+                if process.is_alive():
+                    process.terminate()
+            for process in context.processes:
+                process.join()
+            raise
+
+
+@contextmanager
+def experiment_lock(details):
+    with (details / "training.lock").open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError("This experiment is already running in another process") from exc
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def validate_resume(manifest, cfg, prepared, purpose, code_hashes):
+    previous = Config.from_dict(manifest["config"]).to_dict()
+    allowed = {"N", "M", "seed", "windows_ms", "device", "gpu_ids", "evaluation_device", "num_workers",
+               "cpu_threads", "data_root", "cache_root", "output_root", "experiment_name",
+               "resume", "check_gradients", "variance_ddof"}
+    differences = [key for key, value in cfg.to_dict().items() if key not in allowed and previous[key] != value]
+    if differences:
+        raise ValueError(f"Resume would change training/model settings: {differences}; use a new experiment_name")
+    if manifest["purpose"] != purpose or manifest["dataset_fingerprint"] != prepared.metadata["fingerprint"]:
+        raise ValueError("Resume dataset fingerprint or experiment purpose differs")
+    selection_hash = hashlib.sha256(prepared.ids.tobytes()).hexdigest()
+    if manifest["selected_trial_count"] != len(prepared.ids) or manifest.get("selection_sha256", selection_hash) != selection_hash:
+        raise ValueError("Resume trial selection differs")
+    # 旧版可升级训练/评估基础设施；网络和预处理代码必须完全相同。
+    checked_sources = ("model.py", "data.py") if manifest.get("format_version", 1) == 1 else (
+        "model.py", "data.py", "train.py", "evaluate.py")
+    if any(manifest["code_sha256"][name] != code_hashes[name] for name in checked_sources):
+        raise ValueError("Resume source code differs; use archived code or a new experiment_name")
 
 
 def run_experiment(cfg=CONFIG, prepared=None, purpose="formal"):
@@ -190,26 +369,47 @@ def run_experiment(cfg=CONFIG, prepared=None, purpose="formal"):
     if purpose == "formal" and cfg.subject_ids != tuple(range(1, 36)):
         raise ValueError("Formal Benchmark LOSO requires all 35 source-pool subjects; change N to limit test folds")
     root = cfg.output_root / cfg.experiment_name
-    if root.exists():
+    if root.exists() and not cfg.resume:
         raise FileExistsError(f"Refusing to overwrite {root}; change experiment_name")
+    details = root / "details"
+    details.mkdir(parents=True, exist_ok=True)
+    with experiment_lock(details):
+        existed = (details / "experiment.json").is_file()
+        if existed and not cfg.resume:
+            raise FileExistsError(f"Refusing to overwrite {root}; change experiment_name")
+        if not existed:
+            # 准备数据时中断只留下锁文件，可安全重新准备；未知文件不覆盖。
+            if any(path.relative_to(root).as_posix() not in ("details", "details/training.lock")
+                   for path in root.rglob("*")):
+                raise ValueError(f"Existing experiment has no manifest: {root}; use a new experiment_name")
+        return run_locked_experiment(cfg, prepared, purpose, root, existed)
+
+
+def run_locked_experiment(cfg, prepared, purpose, root, existed):
     jobs = experiment_jobs(cfg)
-    devices = training_devices(cfg)[:len(jobs)]
-    print(f"Training devices: {[str(d) for d in devices]}; independent jobs: {len(jobs)}", flush=True)
+    devices = training_devices(cfg)
     torch.set_num_threads(cfg.cpu_threads)
     prepared = prepare_data(cfg) if prepared is None else prepared.validate(cfg)
     if purpose == "formal" and len(prepared.ids) != len(cfg.subject_ids) * cfg.num_blocks * cfg.num_classes:
         raise ValueError("Formal experiment must use all trials")
     details = root / "details"
-    details.mkdir(parents=True, exist_ok=False)
     os.environ.setdefault("MPLCONFIGDIR", str(details / "plot_cache"))
     source_names = ("config.py", "data.py", "model.py", "train.py", "evaluate.py", "requirements.txt")
     code_hashes = {name: file_sha256(PROJECT_ROOT / name) for name in source_names}
-    (details / "source").mkdir()
+    previous = json.loads((details / "experiment.json").read_text(encoding="utf-8")) if existed else None
+    if previous is not None:
+        validate_resume(previous, cfg, prepared, purpose, code_hashes)
+    pending = [job for job in jobs if not completed_job(run_path(root, *job), job, prepared, cfg)]
+    devices = devices[:max(1, len(pending))]
+    print(f"Training devices: {[str(d) for d in devices]}; jobs={len(jobs)}, "
+          f"completed={len(jobs) - len(pending)}, pending={len(pending)}", flush=True)
+    source_dir = details / ("source_resume" if existed else "source")
+    source_dir.mkdir(exist_ok=True)
     for name in source_names:
-        shutil.copy2(PROJECT_ROOT / name, details / "source" / name)
+        shutil.copy2(PROJECT_ROOT / name, source_dir / name)
     decision_file = PROJECT_ROOT / "docs" / "IMPLEMENTATION_NOTES.zh-CN.md"
     if decision_file.exists():
-        shutil.copy2(decision_file, details / "source" / decision_file.name)
+        shutil.copy2(decision_file, source_dir / decision_file.name)
     manifest = {"config": cfg.to_dict(), "purpose": purpose, "status": "running",
                 "created_utc": datetime.now(timezone.utc).isoformat(), "environment": environment_info(devices[0]),
                 "training_devices": [str(d) for d in devices],
@@ -218,14 +418,23 @@ def run_experiment(cfg=CONFIG, prepared=None, purpose="formal"):
                 "dataset_fingerprint": prepared.metadata["fingerprint"], "code_sha256": code_hashes,
                 "selected_trial_count": len(prepared.ids), "selection": "final epoch only; no target-dependent selection",
                 "statistics": "Population variance by default, not standard deviation; ITR computed per subject/seed first"}
+    manifest.update(format_version=2, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest())
+    if previous is not None:
+        manifest["created_utc"] = previous["created_utc"]
+        manifest["resumptions"] = previous.get("resumptions", []) + [{
+            "utc": datetime.now(timezone.utc).isoformat(), "previous_config": previous["config"],
+            "previous_code_sha256": previous["code_sha256"], "previous_environment": previous["environment"]}]
     write_json(details / "experiment.json", manifest)
     write_json(details / "dataset.json", prepared.metadata)
+    # 运行范围可从 M=3 缩为 M=1；防止旧范围的汇总在恢复期间被误读。
+    (root / "summary.csv").unlink(missing_ok=True)
     try:
-        execute_jobs(devices, cfg, prepared, root, purpose, jobs)
+        execute_jobs(devices, cfg, prepared, root, purpose, pending)
         summarize_experiment(root, cfg)
         manifest["status"] = "complete"
-    except Exception as exc:
-        manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+    except BaseException as exc:
+        manifest.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                        error=f"{type(exc).__name__}: {exc}")
         raise
     finally:
         write_json(details / "experiment.json", manifest)

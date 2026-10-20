@@ -67,15 +67,17 @@ class Config:
 
     gaze_shift_seconds: float = 0.5  # P：ITR 分母 = Tl+0.5 s
     variance_ddof: int = 0  # 用户要求方差，不是标准差；默认总体方差
-    device: str = "cuda:0"  # 训练：auto/cpu/cuda/cuda:0/cuda:1；auto 优先使用 gpu_ids 中可用卡
+    device: str = "cuda"  # 训练：auto/cpu/cuda/cuda:0/cuda:1；auto 优先使用 gpu_ids 中可用卡
     gpu_ids: tuple = (0, 1)  # auto/cuda 时，一张卡一个独立任务进程；单卡可设为 (0,)
-    evaluation_device: str = "cuda:0"  # 独立 evaluate.py：auto/cpu/cuda:0/cuda:1；训练后的测试跟随任务设备
+    evaluation_device: str = "auto"  # 独立 evaluate.py：auto/cpu/cuda:0/cuda:1；训练后的测试跟随任务设备
     num_workers: int = 0  # 可调 DataLoader 进程数；Windows 安全默认
     cpu_threads: int = 4  # CPU 运算线程数
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
+    check_gradients: bool = False  # 调试开关：逐 batch 扫描全部梯度；正式训练关闭以减少开销
+    resume: bool = True  # 同名实验自动跳过完成任务、从上个完整 epoch 恢复
     cache_root: Path = PROJECT_ROOT / "cache"  # 仅一个可复用预处理缓存文件
     output_root: Path = PROJECT_ROOT / "results"  # 正式实验输出
-    experiment_name: str = "spiketfnet"  # 已存在时拒绝覆盖
+    experiment_name: str = "spiketfnet"  # 同名恢复；换名称可开始全新实验
     probe_trials: int = 4  # 保存供未来效率测量使用的代表性输入数量
 
     @property
@@ -129,6 +131,8 @@ class Config:
             raise ValueError("Invalid optimizer or auxiliary loss settings")
         if self.cpu_threads < 1 or self.num_workers < 0 or self.gaze_shift_seconds < 0:
             raise ValueError("Invalid runtime or ITR settings")
+        if any(type(value) is not bool for value in (self.resume, self.check_gradients)):
+            raise ValueError("resume and check_gradients must be bool")
         for name in (self.device, self.evaluation_device):
             if name not in ("auto", "cpu", "cuda") and not (
                     isinstance(name, str) and name.startswith("cuda:") and name[5:].isdigit()):

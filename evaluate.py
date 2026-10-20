@@ -67,7 +67,7 @@ class SpikeRecorder:
 
     def _hook(self, index):
         def record(module, inputs, output):
-            self.counts[index] += int(output.detach().sum().item())
+            self.counts[index] = self.counts[index] + output.detach().sum(dtype=torch.int64)
             self.elements[index] += output.numel()
         return record
 
@@ -90,7 +90,7 @@ def evaluate_model(model, loader, cfg, window_ms, device):
                     probes_time.append(time[:remaining].numpy().copy())
                     probes_spectrum.append(spectrum[:remaining].numpy().copy())
                     probe_count += len(probes_time[-1])
-                outputs = model(time.to(device), spectrum.to(device))
+                outputs = model(time.to(device, non_blocking=True), spectrum.to(device, non_blocking=True))
                 for name in collected:
                     value = labels if name == "labels" else outputs[name]
                     collected[name].append(value.detach().cpu().numpy())
@@ -105,7 +105,8 @@ def evaluate_model(model, loader, cfg, window_ms, device):
     metrics = {"acc_percent": 100 * accuracy,
                "itr_bits_per_minute": itr_bits_per_minute(accuracy, cfg.num_classes,
                                                            window_ms / 1000 + cfg.gaze_shift_seconds)}
-    arrays.update(spike_layer_names=np.asarray(recorder.names), spike_counts=np.asarray(recorder.counts, dtype=np.int64),
+    arrays.update(spike_layer_names=np.asarray(recorder.names),
+                  spike_counts=torch.stack(recorder.counts).cpu().numpy(),
                   spike_elements=np.asarray(recorder.elements, dtype=np.int64),
                   probe_time=np.concatenate(probes_time), probe_spectrum=np.concatenate(probes_spectrum))
     return metrics, arrays

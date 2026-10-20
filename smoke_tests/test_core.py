@@ -10,11 +10,14 @@ from scipy import signal
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from config import CONFIG, Config
+from config import CONFIG as PROJECT_CONFIG, Config
 from data import complex_spectrum, loso_indices, preprocess_subject
 from evaluate import aggregate_matrix, evaluate_model, itr_bits_per_minute
 from model import GatedFusion, SpikeAttention, SpikeTFNet, joint_loss, lif_node
 from train import seed_everything, train_epoch
+
+CONFIG = replace(PROJECT_CONFIG, windows_ms=(500, 600, 700, 800, 900, 1000),
+                 device="cpu", evaluation_device="cpu")
 
 
 class CoreTests(unittest.TestCase):
