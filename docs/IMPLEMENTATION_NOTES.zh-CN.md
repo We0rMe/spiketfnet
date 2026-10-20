@@ -41,7 +41,7 @@ SpikingJelly 的输入衰减和硬重置语义依据其 [LIFNode 文档](https:/
 **用户新增要求与论文区别**
 
 - N 控制测试折 S1..SN；每折训练池始终为另外 34 人。
-- M 默认 3，每折 seeds=42,43,44；原文只固定 seed=42。每个窗口、每折、每个种子完全重新初始化模型和优化器。
+- M 默认 3，每折 seeds=seed,seed+1,seed+2；原文只固定 seed=42，当前用户配置为 seed=2026。每个窗口、每折、每个种子完全重新初始化模型和优化器。
 - 原文跨被试报告均值±标准差；按用户要求输出均值±方差，并单列跨重复与跨被试的统计口径。
 - 只计算 ACC/ITR 作为最终测试指标。训练曲线保留联合 loss 和训练 ACC；不画每 epoch 测试曲线。
 
@@ -50,3 +50,9 @@ SpikingJelly 的输入衰减和硬重置语义依据其 [LIFNode 文档](https:/
 预处理只做每个 trial 独立的固定变换；没有全数据标准化、目标自适应、目标 BN 更新或重叠滑窗。缓存包含所有 trial 但不进行跨 trial 拟合。训练 DataLoader 只接收源被试索引，测试在最终 epoch 后 eval/inference_mode 执行。每次 forward 清空 LIF 内存，跨 batch 不继承状态。完整训练和测试身份数组保存在 details/evaluation.npz，可直接审计。
 
 本实现没有复制不完整参考文献中的未知设置，也未根据本地冒烟 ACC 调整模型。参数量、FLOPs/SOPs、配对检验和硬件效率分析需要正式实验及相应基线或服务器测量，不能从冒烟结果推断。
+
+**2026-10-20：服务器双 GPU 执行**
+
+`config.py` 增加训练设备池 `device/gpu_ids` 与独立重评估设备 `evaluation_device`。双 GPU 各执行独立的窗口/被试/种子任务，采用 PyTorch `spawn`，每个进程只在自己的设备创建模型。任务之间不共享模型、梯度、BN 或 LIF 内存；不引入 DDP/SyncBatchNorm，不改变每个模型的 batch size 和训练轮数。每个任务重新设定随机种子，完成后在同一卡测试，父进程等待所有任务成功后汇总。预处理仍在 CPU 完成，LOSO 身份边界保持不变。
+
+服务器依赖固定为 CUDA 12.1 版 PyTorch 2.5.1 / torchvision 0.20.1；本地冒烟使用 `smoke_tests/requirements.txt` 中相同版本的 CPU 构建。双 CPU 进程测试用于验证调度和隔离，不能代替真实 GPU 内核、显存容量及性能验证。

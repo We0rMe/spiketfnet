@@ -1,5 +1,8 @@
-torch==2.5.1
-torchvision==0.20.1
+# Server: NVIDIA GPUs, CUDA 12.1 wheels (requires a compatible NVIDIA driver).
+# CPU smoke environment: use smoke_tests/requirements.txt instead.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
 spikingjelly==0.0.0.0.14
 numpy==1.26.4
 scipy==1.13.1

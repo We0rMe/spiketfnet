@@ -28,8 +28,15 @@ def resolve_device(name):
     if name == "auto":
         name = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(name)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but unavailable")
+    if device.type not in ("cpu", "cuda"):
+        raise ValueError("Only cpu and cuda devices are supported")
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but unavailable; install the CUDA requirements on the server")
+        index = 0 if device.index is None else device.index
+        if index >= torch.cuda.device_count():
+            raise ValueError(f"cuda:{index} requested but only {torch.cuda.device_count()} GPUs are visible")
+        device = torch.device("cuda", index)
     return device
 
 
@@ -177,14 +184,16 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
     if data_root is not None:
         cfg = replace(cfg, data_root=Path(data_root))
     if device_name is not None:
-        cfg = replace(cfg, device=device_name)
+        cfg = replace(cfg, evaluation_device=device_name)
     if file_sha256(Path(__file__).with_name("model.py")) != manifest["code_sha256"]["model.py"]:
         raise ValueError("Model source changed; use the archived source to replay this experiment")
     prepared = prepare_data(cfg) if prepared is None else prepared.validate(cfg)
     if prepared.metadata["fingerprint"] != manifest["dataset_fingerprint"]:
         raise ValueError("Dataset/preprocessing differs from the training experiment")
     lookup = {tuple(identity): i for i, identity in enumerate(prepared.ids)}
-    device = resolve_device(cfg.device)
+    device = resolve_device(cfg.evaluation_device)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
     torch.set_num_threads(cfg.cpu_threads)
     for window in cfg.windows_ms:
         for subject in cfg.test_subjects:
@@ -206,4 +215,5 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
 
 
 if __name__ == "__main__":
-    reevaluate_experiment(CONFIG.output_root / CONFIG.experiment_name, data_root=CONFIG.data_root, device_name=CONFIG.device)
+    reevaluate_experiment(CONFIG.output_root / CONFIG.experiment_name, data_root=CONFIG.data_root,
+                         device_name=CONFIG.evaluation_device)

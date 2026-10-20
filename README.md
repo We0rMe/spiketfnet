@@ -23,22 +23,38 @@ N = 35                    # 测试被试依次 S1,...,SN
 M = 3                     # 每折独立训练 3 次
 seed = 42                 # 种子 42、43、44
 simulation_steps = 4       # Ts，可以修改
+device = "cuda"           # 训练设备：cuda 使用下列 GPU 池；auto 允许 CPU 回落
+gpu_ids = (0, 1)           # 两张 GPU 各运行一个独立训练任务
+evaluation_device = "cuda:0"  # 单独运行 evaluate.py 时使用的设备
 experiment_name = "benchmark_spiketfnet_v1"
 ```
 
 N 只限制测试折数。即使 N=1，正式训练仍用除 S1 外的全部 34 名被试，不能把源被试池缩小为 N 个人。默认完整任务为 6 个窗口 × 35 折 × 3 种子 = 630 次独立训练。调试服务器配置时可先设 N=1、M=1、`windows_ms=(500,)`；不要把这种子集成绩当成完整 LOSO 结果。
 
-服务器建议 Python 3.9–3.12（本地已测试 3.12）。先在服务器新建自己的环境；根据服务器驱动选择 PyTorch 2.5.1 的 CUDA 构建，然后安装其余依赖。以下 CUDA 12.1 命令依据 [PyTorch 官方历史版本说明](https://pytorch.org/get-started/previous-versions/)，仅在服务器驱动兼容时使用：
+服务器建议 Python 3.9–3.12（本地已测试 3.12）。`requirements.txt` 固定 PyTorch 2.5.1 / torchvision 0.20.1 的 CUDA 12.1 构建，需要兼容的 NVIDIA 驱动。构建对应关系见 [PyTorch 官方历史版本说明](https://pytorch.org/get-started/previous-versions/)。Linux 服务器安装和启动：
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 python -m pip install -r requirements.txt
 python train.py
 ```
 
-默认自动选择可用的 CUDA，否则使用 CPU。项目当前 Windows `.venv` 是冒烟专用 CPU 环境，不上传、不拷贝到服务器。库版本与论文所述 Python 3.9/CUDA 11.6 环境不完全相同，运行时版本会归档。
+Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余相同。项目当前 Windows `.venv` 是冒烟专用 CPU 环境，不上传、不拷贝到服务器。库版本与论文所述 Python 3.9/CUDA 11.6 环境不完全相同，运行时版本会归档。
+
+设备选项统一在 `config.py`，无需修改各脚本中的硬编码设备：
+
+| 配置 | 运行方式 |
+| --- | --- |
+| `device="auto", gpu_ids=(0, 1)`（默认） | 使用池中可见的 GPU；一张卡时单卡，没有 CUDA 时 CPU |
+| `device="cuda", gpu_ids=(0, 1)` | 要求两张卡均可用，否则立即报错 |
+| `device="cuda:1"` | 仅使用编号 1 的卡；此时忽略 GPU 池 |
+| `device="cpu"` | CPU 串行训练 |
+| `evaluation_device="auto"/"cpu"/"cuda:0"/"cuda:1"` | 控制单独启动的 `evaluate.py`，一次用一张卡 |
+
+双卡采用独立实验并行：按“窗口 × 留出被试 × 种子”分配任务，每张卡一个 `spawn` 进程，分别维护模型、优化器、BatchNorm 和 LIF 状态。每个模型的 batch size 仍为 128、学习率不变；每次训练完成的测试跟随该模型所在卡。不同任务写入各自目录，全部完成后才统一汇总。此模式不使用 DDP 拆分同一模型的 batch；只配置一个训练任务时只启用一张卡。GPU 编号以进程可见编号为准，设置 `CUDA_VISIBLE_DEVICES` 后会重新编号。
+
+`data.py` 的 SciPy 预处理固定在 CPU，`model.py` 的参数和输入由训练/评估脚本统一搬到所选设备。预处理在父进程完成一次，各训练进程只接收数据。设备名称、GPU 型号及进程号保存在 `details/`，不增加根目录结果文件。独立模型可以用不同 GPU 型号执行，但实际耗时与数值可重复性需在服务器验证。
 
 `python data.py` 可单独准备缓存，`python train.py` 也会自动调用它。缓存只有 `cache/benchmark_prepared.npz` 一个文件，保存选通道后的最大窗片段与数据依据；每次核验原文件 SHA-256、预处理配置和数据脚本哈希，不把旧配置缓存误当新数据。原始数据从不被改写。
 
@@ -85,9 +101,13 @@ runs/benchmark_spiketfnet_v1/
 ## 本地冒烟
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -r smoke_tests\requirements.txt
 .\.venv\Scripts\python.exe smoke_tests\run_smoke.py
+.\.venv\Scripts\python.exe smoke_tests\run_parallel_smoke.py
 ```
 
 所有临时缓存、报告、训练及评估结果都进入 `smoke_tests/results/`。脚本先做数值与隔离检查，再对真实 S1–S3 数据进行预处理；集成部分取每人 8 个 trial、S1/S2 两折、42/43 两个种子、每次 2 epochs。完整网络尺寸、40 类输出和 Ts=4 保持不变；六个窗口另做形状检查。最后加载四个 checkpoint 重评估，确认 logits 和汇总完全一致。
 
 集成目录已存在时会拒绝覆盖；需要重跑时先自行移走旧 `smoke_tests/results/integration/`。这些低轮数、小样本成绩仅验证软件流程，不能用于评价论文复现性能。`.gitignore` 已排除 `.venv`、缓存、正式和冒烟结果、原始 MAT 与 PDF。
+
+`run_parallel_smoke.py` 的脚本与结果同样位于冒烟目录，结果写入 `smoke_tests/results/parallel_device_check/`，已存在时拒绝覆盖。它检查设备选择和任务完整性，并对真实数据小子集分别执行串行训练、两个 CPU `spawn` 进程并行训练，核对全部权重、训练历史、预测与汇总，再重放 checkpoint。本机 CPU 测试验证并行流程，不代表实际双 GPU 测试已完成。两个冒烟脚本均显式指定本地数据路径和 CPU，不继承服务器的设备设置。

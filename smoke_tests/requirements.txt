@@ -1,0 +1,8 @@
+# Local CPU-only smoke environment; no CUDA wheels are installed here.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+spikingjelly==0.0.0.0.14
+numpy==1.26.4
+scipy==1.13.1
+matplotlib==3.9.4

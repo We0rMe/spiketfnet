@@ -32,8 +32,9 @@ def main():
     if not outcome.wasSuccessful():
         raise SystemExit("Core checks failed; see smoke_tests/results/checks.txt")
 
-    cfg = replace(CONFIG, subject_ids=(1, 2, 3), N=2, M=2, windows_ms=(500,), epochs=2,
-                  batch_size=8, device="cpu", num_workers=0, cache_root=results / "cache",
+    cfg = replace(CONFIG, data_root=Path(r"G:\SSVEP\data\benchmark"), subject_ids=(1, 2, 3),
+                  N=2, M=2, seed=42, windows_ms=(500,), epochs=2,
+                  batch_size=8, device="cpu", evaluation_device="cpu", num_workers=0, cache_root=results / "cache",
                   output_root=results, experiment_name="integration")
     assert channel_indices(cfg) == [60, 61, 62, 54, 55, 56, 47, 53, 57]
     prepared = prepare_data(cfg)

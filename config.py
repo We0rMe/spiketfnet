@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 @dataclass(frozen=True)
 class Config:
-    data_root: Path = Path(r"G:\SSVEP\data\benchmark")  # 服务器上修改数据路径
+    data_root: Path = Path(r"I:\jjh\SSVEP\data\benchmark")  # 服务器上修改数据路径
     subject_ids: tuple = tuple(range(1, 36))  # 数据属性：全部被试；N 不改变源被试池
     sampling_rate: int = 250  # 数据已降采样，Hz
     raw_channels: int = 64  # MAT 电极轴
@@ -18,12 +18,12 @@ class Config:
     num_classes: int = 40  # MAT target 轴，保留原始顺序
     num_blocks: int = 6  # 每个被试的 block 数
     channels: tuple = ("O1", "Oz", "O2", "PO3", "POz", "PO4", "Pz", "PO5", "PO6")
-    cue_seconds: float = 0.5  # 刺激前时间
+    cue_seconds: float = 0.5  # 刺激提示时间
     latency_seconds: float = 0.14  # P：视觉延迟
 
     N: int = 35  # 留出 S1,...,SN；每折用其余全部被试训练
     M: int = 3  # 每折独立训练次数；多种子是用户要求的扩展
-    seed: int = 42  # P：起始种子；使用 seed,...,seed+M-1
+    seed: int = 2026  # P：起始种子；使用 seed,...,seed+M-1
     windows_ms: tuple = (500, 600, 700, 800, 900, 1000)  # P：整数毫秒避免浮点截断
     epochs: int = 100  # P：固定训练轮数，最终 epoch 测试
     batch_size: int = 128  # P：训练批量
@@ -67,7 +67,9 @@ class Config:
 
     gaze_shift_seconds: float = 0.5  # P：ITR 分母 = Tl+0.5 s
     variance_ddof: int = 0  # 用户要求方差，不是标准差；默认总体方差
-    device: str = "auto"  # auto/cpu/cuda；服务器自动使用 CUDA
+    device: str = "cuda:0"  # 训练：auto/cpu/cuda/cuda:0/cuda:1；auto 优先使用 gpu_ids 中可用卡
+    gpu_ids: tuple = (0, 1)  # auto/cuda 时，一张卡一个独立任务进程；单卡可设为 (0,)
+    evaluation_device: str = "auto"  # 独立 evaluate.py：auto/cpu/cuda:0/cuda:1；训练后的测试跟随任务设备
     num_workers: int = 0  # 可调 DataLoader 进程数；Windows 安全默认
     cpu_threads: int = 4  # CPU 运算线程数
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
@@ -127,6 +129,13 @@ class Config:
             raise ValueError("Invalid optimizer or auxiliary loss settings")
         if self.cpu_threads < 1 or self.num_workers < 0 or self.gaze_shift_seconds < 0:
             raise ValueError("Invalid runtime or ITR settings")
+        for name in (self.device, self.evaluation_device):
+            if name not in ("auto", "cpu", "cuda") and not (
+                    isinstance(name, str) and name.startswith("cuda:") and name[5:].isdigit()):
+                raise ValueError("device/evaluation_device must be auto, cpu, cuda or cuda:<index>")
+        if not self.gpu_ids or len(set(self.gpu_ids)) != len(self.gpu_ids) or any(
+                type(index) is not int or index < 0 for index in self.gpu_ids):
+            raise ValueError("gpu_ids must contain unique, nonnegative integer GPU indices")
         if self.lif_tau <= 1 or self.simulation_steps < 1 or not self.dilations:
             raise ValueError("Invalid LIF configuration or residual block count")
         if any(k < 1 or k % 2 == 0 for k in (self.stem_kernel, self.residual_kernel, self.spectral_kernel)):
