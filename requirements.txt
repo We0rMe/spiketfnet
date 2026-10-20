@@ -1,0 +1,6 @@
+torch==2.5.1
+torchvision==0.20.1
+spikingjelly==0.0.0.0.14
+numpy==1.26.4
+scipy==1.13.1
+matplotlib==3.9.4

@@ -1,0 +1,643 @@
+{
+  "subject_count": 35,
+  "subjects": {
+    "S1.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S2.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S3.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S4.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S5.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S6.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S7.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S8.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S9.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S10.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S11.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S12.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S13.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S14.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S15.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S16.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S17.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S18.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S19.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S20.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S21.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S22.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S23.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S24.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S25.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S26.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S27.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S28.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S29.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S30.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S31.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S32.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S33.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S34.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ],
+    "S35.mat": [
+      {
+        "name": "data",
+        "shape": [
+          64,
+          1500,
+          40,
+          6
+        ],
+        "matlab_class_id": 6
+      }
+    ]
+  },
+  "frequency_phase": [
+    {
+      "name": "phases",
+      "shape": [
+        1,
+        40
+      ],
+      "matlab_class_id": 6,
+      "data_type": 9,
+      "values": [
+        0.0,
+        1.5707963267948966,
+        3.141592653589793,
+        4.71238898038469,
+        0.0,
+        1.5707963267948966,
+        3.141592653589793,
+        4.71238898038469,
+        1.5707963267948966,
+        3.141592653589793,
+        4.71238898038469,
+        0.0,
+        1.5707963267948966,
+        3.141592653589793,
+        4.71238898038469,
+        0.0,
+        3.141592653589793,
+        4.71238898038469,
+        0.0,
+        1.5707963267948966,
+        3.141592653589793,
+        4.71238898038469,
+        0.0,
+        1.5707963267948966,
+        4.71238898038469,
+        0.0,
+        1.5707963267948966,
+        3.141592653589793,
+        4.71238898038469,
+        0.0,
+        1.5707963267948966,
+        3.141592653589793,
+        0.0,
+        1.5707963267948966,
+        3.141592653589793,
+        4.71238898038469,
+        0.0,
+        1.5707963267948966,
+        3.141592653589793,
+        4.71238898038469
+      ]
+    },
+    {
+      "name": "freqs",
+      "shape": [
+        1,
+        40
+      ],
+      "matlab_class_id": 6,
+      "data_type": 9,
+      "values": [
+        8.0,
+        9.0,
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+        15.0,
+        8.2,
+        9.2,
+        10.2,
+        11.2,
+        12.200000000000001,
+        13.200000000000001,
+        14.200000000000001,
+        15.200000000000001,
+        8.4,
+        9.4,
+        10.4,
+        11.4,
+        12.4,
+        13.4,
+        14.4,
+        15.4,
+        8.6,
+        9.6,
+        10.6,
+        11.6,
+        12.600000000000001,
+        13.600000000000001,
+        14.600000000000001,
+        15.600000000000001,
+        8.8,
+        9.8,
+        10.8,
+        11.8,
+        12.8,
+        13.8,
+        14.8,
+        15.8
+      ]
+    }
+  ],
+  "audit_date": "2026-10-19",
+  "scope": "Read-only MAT metadata inspection for all 35 subjects; full Freq_Phase.mat values; no full EEG numerical/integrity scan.",
+  "sources": {
+    "dataset_root": "G:\\SSVEP\\data\\benchmark",
+    "readme": "G:\\SSVEP\\data\\benchmark\\Readme.txt",
+    "channel_map": "G:\\SSVEP\\data\\benchmark\\64-channels.loc",
+    "frequency_phase": "G:\\SSVEP\\data\\benchmark\\Freq_Phase.mat",
+    "paper": "C:\\Users\\Administrator\\Desktop\\SpikeTFNet.pdf"
+  },
+  "readme_facts": {
+    "sampling_rate_hz": 250,
+    "trial_duration_s": 6,
+    "prestimulus_s": 0.5,
+    "stimulus_duration_s": 5,
+    "array_axis_order": [
+      "electrode",
+      "sample",
+      "target",
+      "block"
+    ],
+    "acquisition_notch_hz": 50
+  },
+  "selected_channels": [
+    {
+      "name": "O1",
+      "matlab_index": 61,
+      "python_index": 60
+    },
+    {
+      "name": "Oz",
+      "matlab_index": 62,
+      "python_index": 61
+    },
+    {
+      "name": "O2",
+      "matlab_index": 63,
+      "python_index": 62
+    },
+    {
+      "name": "PO3",
+      "matlab_index": 55,
+      "python_index": 54
+    },
+    {
+      "name": "POz",
+      "matlab_index": 56,
+      "python_index": 55
+    },
+    {
+      "name": "PO4",
+      "matlab_index": 57,
+      "python_index": 56
+    },
+    {
+      "name": "Pz",
+      "matlab_index": 48,
+      "python_index": 47
+    },
+    {
+      "name": "PO5",
+      "matlab_index": 54,
+      "python_index": 53
+    },
+    {
+      "name": "PO6",
+      "matlab_index": 58,
+      "python_index": 57
+    }
+  ],
+  "paper_derived_windows": [
+    {
+      "window_ms": 500,
+      "n_samples": 125,
+      "start_zero_based": 160,
+      "stop_exclusive": 285
+    },
+    {
+      "window_ms": 600,
+      "n_samples": 150,
+      "start_zero_based": 160,
+      "stop_exclusive": 310
+    },
+    {
+      "window_ms": 700,
+      "n_samples": 175,
+      "start_zero_based": 160,
+      "stop_exclusive": 335
+    },
+    {
+      "window_ms": 800,
+      "n_samples": 200,
+      "start_zero_based": 160,
+      "stop_exclusive": 360
+    },
+    {
+      "window_ms": 900,
+      "n_samples": 225,
+      "start_zero_based": 160,
+      "stop_exclusive": 385
+    },
+    {
+      "window_ms": 1000,
+      "n_samples": 250,
+      "start_zero_based": 160,
+      "stop_exclusive": 410
+    }
+  ],
+  "derived_counts": {
+    "trials_per_subject": 240,
+    "total_trials": 8400,
+    "source_trials_before_validation": 8160,
+    "test_trials_per_fold": 240,
+    "fold_window_jobs_per_seed": 210
+  }
+}
