@@ -119,6 +119,9 @@ def main():
     provenance["status"] = "training"
     write_json(legacy_private / "provenance.json", provenance)
     (legacy_private / "model.pt").unlink()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("format_version")
+    write_json(manifest_path, manifest)
     train.run_experiment(replace(cfg, N=1, M=1, experiment_name="legacy"), selected, purpose="smoke")
     assert (legacy_private / "history_before_restart.csv").is_file()
     report = (f"# Resume smoke: PASS\n\n{outcome.testsRun} core/device/recovery checks passed.\n"

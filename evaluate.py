@@ -16,6 +16,136 @@ from data import WindowDataset, file_sha256, prepare_data
 from model import SpikeTFNet
 
 
+def write_text(path, text):
+    path = Path(path)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
+def read_history(path):
+    if not Path(path).exists():
+        return []
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        return [{key: (int(value) if key == "epoch" else float(value)) if value else None
+                 for key, value in row.items()} for row in csv.DictReader(handle)]
+
+
+def plot_training(history, destination, title):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.8), constrained_layout=True)
+    monitored = [row for row in history if row.get("monitor_loss") is not None]
+    for ax, training_key, monitor_key, label in zip(
+            axes, ("loss", "train_acc_percent"), ("monitor_loss", "monitor_acc_percent"), ("Joint loss", "ACC (%)")):
+        ax.plot([row["epoch"] for row in history], [row[training_key] for row in history],
+                label="Training batches (dropout ON)", marker="." if len(history) < 10 else None)
+        if monitored:
+            ax.plot([row["epoch"] for row in monitored], [row[monitor_key] for row in monitored], ".-",
+                    label="Training subset (dropout OFF; NOT validation)")
+        ax.set(xlabel="Epoch", ylabel=label)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=7)
+    axes[1].set_ylim(0, 100)
+    fig.suptitle(title)
+    temporary = Path(destination).with_suffix(".tmp")
+    try:
+        fig.savefig(temporary, format="png", dpi=140)
+        temporary.replace(destination)
+    finally:
+        plt.close(fig)
+
+
+def plot_confusion(folder, cfg):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    with np.load(Path(folder) / "details/evaluation.npz", allow_pickle=False) as arrays:
+        labels, predictions = arrays["labels"], arrays["logits"].argmax(1)
+    counts = np.zeros((cfg.num_classes, cfg.num_classes), dtype=np.int64)
+    np.add.at(counts, (labels, predictions), 1)
+    fig, ax = plt.subplots(figsize=(7, 6), constrained_layout=True)
+    im = ax.imshow(counts, cmap="Blues", vmin=0)
+    ticks = np.arange(0, cfg.num_classes, 5)
+    ax.set(xticks=ticks, xticklabels=ticks + 1, yticks=ticks, yticklabels=ticks + 1,
+           xlabel="Predicted target (MAT order)", ylabel="True target (MAT order)", title="Final test confusion")
+    fig.colorbar(im, ax=ax, label="Trials")
+    temporary = Path(folder) / "confusion.tmp"
+    try:
+        fig.savefig(temporary, format="png", dpi=140)
+        temporary.replace(Path(folder) / "confusion.png")
+    finally:
+        plt.close(fig)
+
+
+def write_run_report(folder, cfg, history, provenance):
+    def number(value):
+        return "未记录" if value is None else f"{value:.4f}"
+    monitored = [row for row in history if row.get("monitor_loss") is not None]
+    last = history[-1] if history else {}
+    lines = [f"# SpikeTFNet · S{provenance['test_subject']:02d} · seed {provenance['seed']}",
+             "", f"状态：{provenance['status']}；历史记录进度：{last.get('epoch', 0)}/{cfg.epochs} epoch。",
+             f"窗口：{provenance['window_ms']} ms；设备：{provenance.get('device', '未记录')}。",
+             f"训练被试：{provenance['training_subjects']}；训练 trial：{provenance['training_trials']}；"
+             f"测试 trial：{provenance['test_trials']}。",
+             "", "| 训练观察 | 最新记录 |", "| --- | ---: |",
+             f"| 训练联合 loss（Dropout 开） | {number(last.get('loss'))} |",
+             f"| 训练 ACC %（Dropout 开） | {number(last.get('train_acc_percent'))} |",
+             f"| 已记录训练用时，不含监测/保存/绘图（分钟） | "
+             f"{sum(row.get('train_seconds') or 0 for row in history) / 60:.2f} |"]
+    if monitored:
+        lines += [f"| 训练子集监测 epoch | {monitored[-1]['epoch']} |",
+                  f"| 训练子集监测联合 loss（Dropout 关） | {number(monitored[-1]['monitor_loss'])} |",
+                  f"| 训练子集监测 ACC %（Dropout 关） | {number(monitored[-1]['monitor_acc_percent'])} |"]
+    if provenance["status"] == "complete":
+        metrics = json.loads((Path(folder) / "metrics.json").read_text(encoding="utf-8"))
+        lines += ["", "固定末轮模型的测试结果：", "", "| 指标 | 数值 |", "| --- | ---: |",
+                  f"| ACC % | {metrics['acc_percent']:.4f} |",
+                  f"| ITR bits/min | {metrics['itr_bits_per_minute']:.4f} |",
+                  "", "![测试混淆矩阵](confusion.png)"]
+    lines += ["", "训练集监测使用源训练被试的第一个 block，**不是独立验证集**，不能用于判断跨被试泛化。",
+              "不按监测值早停或选模型。留出被试只在固定最后一轮之后测试。",
+              f"监测间隔：{cfg.monitor_every}（0 为关闭）；历史中有监测值的 epoch：{len(monitored)}。",
+              "升级前缺少的监测值不回填；旧控制台输出无法恢复，日志中的 RECOVERED 行仅由已保存历史重建。",
+              "", "![训练过程](training.png)", "",
+              "[训练日志](training.log) · [原始训练历史](details/history.csv) · [配置与源码](../../../details/experiment.json)"]
+    write_text(Path(folder) / "report.md", "\n".join(lines) + "\n")
+
+
+def refresh_progress(root, cfg):
+    rows, completed = [], 0
+    for window in cfg.windows_ms:
+        for subject in cfg.test_subjects:
+            for seed in cfg.seeds:
+                folder = run_path(root, window, subject, seed)
+                path = folder / "details/provenance.json"
+                provenance = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+                status = provenance.get("status", "pending")
+                history = read_history(folder / "details/history.csv")
+                epoch = history[-1]["epoch"] if history else 0
+                acc, itr = "—", "—"
+                if status == "complete":
+                    metric = json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
+                    acc, itr = f"{metric['acc_percent']:.4f}", f"{metric['itr_bits_per_minute']:.4f}"
+                    completed += 1
+                relative = folder.relative_to(root).as_posix()
+                link = f"[详情]({relative}/report.md)" if (folder / "report.md").exists() else "—"
+                rows.append(f"| {window} | S{subject:02d} | {seed} | {status} | {epoch}/{cfg.epochs} | {acc} | {itr} | {link} |")
+    total = len(rows)
+    text = ["# SpikeTFNet 实验进度", "", f"已完成 **{completed}/{total}** 个任务。",
+            "部分结果：未完成项不计为 0，也不将部分任务均值称为完整 LOSO 结果。" if completed < total
+            else "全部任务已完成；正式统计见 [summary.csv](summary.csv)，按均值 ± 方差呈现。",
+            "", "| 窗口 ms | 测试被试 | seed | 状态 | epoch | ACC % | ITR bits/min | 报告 |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | --- |", *rows, "",
+            "训练曲线的监测线来自训练子集，不是独立验证集。最终测试结果不参与早停或选模。",
+            "M=1 时没有独立种子重复，跨重复方差 0 不代表稳定性。",
+            "", "[主进程日志](details/experiment.log) · [实验配置及恢复记录](details/experiment.json)"]
+    write_text(Path(root) / "report.md", "\n".join(text) + "\n")
+
+
 def write_json(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,8 +341,14 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
                 model.load_state_dict(torch.load(folder / "details" / "model.pt", map_location=device, weights_only=True))
                 metrics, arrays = evaluate_model(model, loader, cfg, window, device)
                 save_evaluation(folder, metrics, arrays, training_ids, test_ids)
+                history = read_history(folder / "details/history.csv")
+                provenance = json.loads((folder / "details/provenance.json").read_text(encoding="utf-8"))
+                plot_confusion(folder, cfg)
+                write_run_report(folder, cfg, history, provenance)
                 del model
-    return summarize_experiment(root, cfg)
+    summary = summarize_experiment(root, cfg)
+    refresh_progress(root, cfg)
+    return summary
 
 
 if __name__ == "__main__":

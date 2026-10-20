@@ -29,6 +29,8 @@ gpu_ids = (0, 1)           # 两张 GPU 各运行一个独立训练任务
 evaluation_device = "cuda:0"  # 单独运行 evaluate.py 时使用的设备
 resume = True             # 同名实验恢复；完成的任务自动跳过
 check_gradients = False   # 正式训练关闭逐 batch 全梯度扫描
+monitor_every = 5         # 源训练子集监测，非验证集；首轮、末轮也测，0 禁用
+plot_every = 1            # 每个 epoch 覆盖更新训练曲线和单次报告
 experiment_name = "spiketfnet"
 ```
 
@@ -67,11 +69,25 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 ## 耗时和恢复
 
-每个 epoch 输出一行，包含设备、窗口、测试被试、种子、loss、训练 ACC、`train`、`save`、`total` 秒数。`train` 在 CUDA 同步后计时，涵盖 DataLoader、传输、前反向和优化；`save` 是 checkpoint 与历史写盘时间，`total` 为两者合计，不包括初始预处理及最终测试。`details/history.csv` 增加 `train_seconds`，不单独创建计时文件。
+每个 epoch 输出一行，包含设备、窗口、测试被试、种子、loss、训练 ACC，以及 `train`、`monitor`、`save`、`plot`、`total` 秒数。`train` 在 CUDA 同步后计时，涵盖 DataLoader、传输、前反向和优化；其余依次是训练子集监测、checkpoint/历史写盘、曲线/报告更新与本轮总耗时，不包括初始预处理及最终测试。该行实时追加到任务根目录 `training.log` 并 flush；错误栈和恢复信息也保留。主进程调度日志在实验 `details/experiment.log`，双卡各自写自己的任务日志。
 
 每个任务开始时保存 epoch 0，之后每个完整 epoch 原子替换 `details/resume.pt`。该文件包含模型、Adam 状态、epoch、训练历史、Python/NumPy/Torch/CUDA 随机状态和 DataLoader 的打乱生成器状态。中途停止后，执行同一条 `python train.py` 即从最后成功保存的 epoch 后继续；当前未保存的 epoch 会重做。最终测试成功后删除恢复文件，只保留 `model.pt`。checkpoint 是恢复用途，测试仍只使用固定最后一轮模型。
 
 恢复会校验数据指纹、trial 身份、模型/预处理和训练设置。可调整 N、M、起始 seed 和设备分配；学习率、batch size、epoch 总数、网络参数、确定性设置变化必须使用新实验名。窗口修改仍要求预处理指纹一致。新格式还校验训练与评估代码哈希；环境或 CPU/CUDA 后端变化不保证逐位相同，运行环境会记入恢复记录。
+
+本次输出升级支持上一版 format_version=2 的断点：先验证已归档源码与原哈希一致，再核对其是否为已审查的旧版 train/evaluate（兼容 LF/CRLF 换行），才允许升级至 format_version=3。模型、预处理、优化器、训练数据顺序及原 checkpoint 格式保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。
+
+升级步骤：先停止服务器现有训练并确认子进程退出；同步新版代码；保留原 `experiment_name`、数据路径、N/M/seed 和科学参数，保持 `resume=True`；再次运行 `python train.py`。无需重命名、搬动或删除现有结果目录。已完成任务只补充展示文件，不重新训练；未完成任务从 checkpoint 的 epoch 继续。不要在训练仍运行时单独启动 `evaluate.py`。
+
+旧训练历史可以重新绘图并在新日志中生成带 `RECOVERED` 标记的记录，但这不是原控制台日志。旧 epoch 的监测 loss/ACC 从未计算过，不能事后补造；监测曲线只从升级后的实际测量点开始，空缺不会填 0。新增监测和实时绘图会有额外耗时，可调整 `monitor_every`、`plot_every`，不改变优化过程。
+
+## 为什么没有独立验证集
+
+原训练协议将其余 34 名源被试的全部 8160 个 trial 用于优化，没有独立验证划分，留出被试只在固定最后一轮后测试。参考的 SSVEPformer 项目同样使用**训练集监测**而非验证集：每名源训练被试取第一个 block，共 1360 个 trial，在 eval 模式关闭 Dropout 后计算 loss/ACC。
+
+现在按该方式增加监测线，默认在第 1、5、10、…、100 个 epoch 测量。监测子集仍属于训练集，仅用于观察拟合；蓝线是所有训练 batch 边更新边累计、Dropout 开启的数值，橙线是固定子集在当前权重下关闭 Dropout 的数值，两者口径不同。监测不更新 BatchNorm、不反向传播、不早停或选模，也不接触留出被试。
+
+若需要真正独立的验证集，必须事先从源被试中划出不参与训练的数据并重新训练。当前模型已经见过全部源训练数据，中途再划分不能成为此前未见的独立验证集。本次为保留断点，未改变该划分。
 
 从旧版升级时，完整任务会核验并复用；旧版中途任务没有权重时会明确打印 `no saved weights; restart from epoch 1`，把原曲线留到 `details/history_before_restart.csv` 后重训。旧版若已经写出末轮权重而测试中断，则只补完测试。旧版未保存的中途参数无法恢复。原始源码快照保留，恢复时执行的源码放在 `details/source_resume/`，变更配置及环境记录在原 `experiment.json` 中。
 
@@ -83,23 +99,30 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 ```text
 results/spiketfnet/
+  report.md                           # 当前任务进度、已完成任务指标及报告链接
   summary.csv                         # 唯一汇总表，包含“均值 ± 方差”列
   details/
+    experiment.log                    # 主进程调度、恢复和错误日志
     experiment.json                   # 配置、版本、用途、状态、代码哈希
     dataset.json                      # 预处理和数据文件指纹
     source/                           # 本轮源代码及实现假设快照
   window_0500ms/test_S01/seed_42/
-    metrics.json                      # 本轮唯一 ACC/ITR 数值记录
-    training.png                      # 一张图：训练联合损失与训练 ACC
+    report.md                         # 可读报告；训练期间随曲线更新，完成后加入测试指标
+    metrics.json                      # 本轮 ACC/ITR 的机器可读记录
+    training.log                      # 实时追加的训练输出、耗时、恢复信息与错误
+    training.png                      # 覆盖更新：训练与源训练子集监测 loss/ACC
+    confusion.png                     # 仅最终测试后生成，基于已保存预测
     details/
       model.pt                        # 固定最后一轮的权重
-      history.csv                     # 训练曲线及每 epoch 训练秒数
+      history.csv                     # 原始曲线、监测值与训练/监测秒数，旧监测值留空
       resume.pt                       # 训练中滚动覆盖；最终评估成功后删除
       provenance.json                 # 测试/训练被试、种子与完成状态
       evaluation.npz                  # 预测、身份、特征、脉冲计数及测量用输入
 ```
 
-`evaluation.npz` 不使用 pickle。内容包括真实标签、三路 logits、融合特征、门控、准确的训练/测试 trial 身份、逐 LIF 层的发放总数与元素总数，以及少量已预处理时域/频域输入。结合 checkpoint、代码和配置，可在服务器后续计算混淆矩阵、其他分类指标、参数量及 FLOPs/SOPs，或重新测量时延和吞吐量。时延须在指定硬件上重新 warm-up、batch size=1 并同步 CUDA 测量；本地仪器化测试时间不能替代论文的时延。
+`evaluation.npz` 不使用 pickle。内容包括真实标签、三路 logits、融合特征、门控、准确的训练/测试 trial 身份、逐 LIF 层的发放总数与元素总数，以及少量已预处理时域/频域输入。混淆矩阵直接从它生成，不再额外保存一份预测 CSV。结合 checkpoint、代码和配置，可在服务器后续计算其他分类指标、参数量及 FLOPs/SOPs，或重新测量时延和吞吐量。时延须在指定硬件上重新 warm-up、batch size=1 并同步 CUDA 测量；本地仪器化测试时间不能替代论文的时延。
+
+双进程运行时总进度报告约每 5 秒刷新；单进程在任务完成时刷新。未完成时报告明确标为部分结果，不将缺失任务当作 0；正式 `summary.csv` 仍在当前 N×M 全部完成后生成。日志是追加文件，曲线与报告覆盖更新，不生成每 epoch 一套文件。
 
 ## 统计口径
 
@@ -123,6 +146,7 @@ results/spiketfnet/
 .\.venv\Scripts\python.exe smoke_tests\run_smoke.py
 .\.venv\Scripts\python.exe smoke_tests\run_parallel_smoke.py
 .\.venv\Scripts\python.exe smoke_tests\run_resume_smoke.py
+.\.venv\Scripts\python.exe smoke_tests\run_reporting_smoke.py
 ```
 
 所有临时缓存、报告、训练及评估结果都进入 `smoke_tests/results/`。脚本先做数值与隔离检查，再对真实 S1–S3 数据进行预处理；集成部分取每人 8 个 trial、S1/S2 两折、42/43 两个种子、每次 2 epochs。完整网络尺寸、40 类输出和 Ts=4 保持不变；六个窗口另做形状检查。最后加载四个 checkpoint 重评估，确认 logits 和汇总完全一致。
@@ -132,3 +156,5 @@ results/spiketfnet/
 `run_parallel_smoke.py` 的脚本与结果同样位于冒烟目录，结果写入 `smoke_tests/results/parallel_device_check/`，已存在时拒绝覆盖。它检查设备选择和任务完整性，并对真实数据小子集分别执行串行训练、两个 CPU `spawn` 进程并行训练，核对全部权重、训练历史、预测与汇总，再重放 checkpoint。本机 CPU 测试验证并行流程，不代表实际双 GPU 测试已完成。两个冒烟脚本均显式指定本地数据路径和 CPU，不继承服务器的设备设置。
 
 `run_resume_smoke.py` 输出到 `smoke_tests/results/resume_check/`，模拟第 1 个 epoch 后中断，再以两个 CPU 进程恢复，比较权重、训练指标、预测和汇总（计时值不要求相同）。另验证完成任务跳过、M 缩减、旧版任务升级、写盘失败保留前一 checkpoint 及并发锁。所有冒烟结果均不作为 GPU 速度或正式复现性能依据。
+
+`run_reporting_smoke.py` 使用 `smoke_tests/fixtures/` 中冻结的 v2 源码生成真实旧断点，与新版监测、实时输出及双进程恢复作对照。结果在 `smoke_tests/results/reporting_check/`。冻结源码仅供冒烟测试，不是服务器训练入口。

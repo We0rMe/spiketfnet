@@ -75,6 +75,8 @@ class Config:
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
     check_gradients: bool = False  # 调试开关：逐 batch 扫描全部梯度；正式训练关闭以减少开销
     resume: bool = True  # 同名实验自动跳过完成任务、从上个完整 epoch 恢复
+    monitor_every: int = 5  # 每隔若干 epoch 监测源训练被试的 block 1；首/末轮也测，0 禁用
+    plot_every: int = 1  # 每隔若干 epoch 覆盖更新曲线和单次报告；不产生逐轮图片
     cache_root: Path = PROJECT_ROOT / "cache"  # 仅一个可复用预处理缓存文件
     output_root: Path = PROJECT_ROOT / "results"  # 正式实验输出
     experiment_name: str = "spiketfnet"  # 同名恢复；换名称可开始全新实验
@@ -133,6 +135,8 @@ class Config:
             raise ValueError("Invalid runtime or ITR settings")
         if any(type(value) is not bool for value in (self.resume, self.check_gradients)):
             raise ValueError("resume and check_gradients must be bool")
+        if type(self.monitor_every) is not int or self.monitor_every < 0 or type(self.plot_every) is not int or self.plot_every < 1:
+            raise ValueError("monitor_every must be nonnegative; plot_every must be positive integers")
         for name in (self.device, self.evaluation_device):
             if name not in ("auto", "cpu", "cuda") and not (
                     isinstance(name, str) and name.startswith("cuda:") and name[5:].isdigit()):
