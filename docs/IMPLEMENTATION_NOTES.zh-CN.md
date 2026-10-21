@@ -100,3 +100,9 @@ SpikingJelly 的输入衰减和硬重置语义依据其 [LIFNode 文档](https:/
 前向使用连续区间以覆盖函数式读出操作；收集反向归属时在已标注图节点处停止，避免重复归属上游，图遍历开销留在整体训练时间。反向按 Node 执行切换区间；CUDA 事件在 epoch 结束统一解析。启用/关闭计时不改变前向结果、梯度、随机状态或优化过程。
 
 新输出只保留 Spectral Times、Temporal Times1/2/3、Total Time 五项。平均每 trial 按实际样本处理次数均摊；旧 trial 数仅在已验证 LOSO 划分及无 drop_last 的既有训练流程下恢复。旧时域总计不用于反推三模块数据，历史缺项保持未知。v6 的 train/evaluate/timing/provenance 及 v5 的旧 timing 需通过归档文件和固定摘要认证，才允许升级；数据与模型校验继续执行。原 checkpoint 结构及随机状态恢复协议不变。
+
+## 第二模块卷积/LIF 前后向诊断（v8）
+
+当前仅统计 temporal.blocks 内所有 Conv1d/LIFNode 的前向与反向四项。前向用层 pre/post hook；反向只包围实际参与 loss 的归属节点。输入上游节点排除，重置后的 LIF 膜电位图纳入，以覆盖跨步梯度；非目标 BN/残差等不计入。没有改变 model.py 或任何训练科学参数，原 epoch 边界同步和有限值检查保留；没有执行多步/CuPy/融合/AMP 等优化。
+
+源码认证支持修改前 v7 的真实断点续训；旧四项时间未知，记录覆盖率。新的四项区间之和不等于原第二模块整体区间。说明、官方依据与审计结果见 [第二模块计时排查](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。

@@ -92,7 +92,7 @@ def main(output_name="reporting_check"):
             pass
         else:
             raise AssertionError("New-version interruption not injected")
-    assert json.loads((upgraded / "details/experiment.json").read_text(encoding="utf-8"))["format_version"] == 7
+    assert json.loads((upgraded / "details/experiment.json").read_text(encoding="utf-8"))["format_version"] == 8
     with patch("train.training_devices", return_value=[torch.device("cpu"), torch.device("cpu")]):
         train.run_experiment(updated_cfg, selected, purpose="smoke")
     assert metric_rows(reference / "summary.csv") == metric_rows(upgraded / "summary.csv")

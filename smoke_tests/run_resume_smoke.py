@@ -46,7 +46,7 @@ def compare_runs(reference, actual):
         assert len(histories[0]) == len(histories[1]) == 3
         for a, b in zip(*histories):
             assert all(a[key] == b[key] for key in ("epoch", "loss", "train_acc_percent"))
-            assert float(a["train_seconds"]) > 0
+            assert float(a["temporal2_conv_forward_seconds"]) > 0
         assert not (folder / "details/resume.pt").exists()
 
 

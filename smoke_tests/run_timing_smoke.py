@@ -23,7 +23,7 @@ from config import CONFIG
 from data import prepare_data
 from evaluate import read_history, run_path
 from smoke_tests.run_ablation_smoke import MODEL_VARIANTS, compare_runs, load_module
-from utils.timing import PARTS, timing_totals
+from utils.timing import TIME_KEYS, timing_totals
 from utils.provenance import LEGACY_SOURCE_PATHS
 import train
 
@@ -83,17 +83,16 @@ def main(output_name="timing_check"):
         folder = run_path(root, 500, 1, cfg.seed)
         history = read_history(folder / "details/history.csv")
         self_times = timing_totals([(variant, history)], cfg.epochs)
-        assert history[0]["spectral_train_seconds"] is None and history[0]["temporal1_train_seconds"] is None
-        for branch in PARTS:
-            absent = variant == ("temporal_only" if branch == "spectral" else "spectral_only")
-            key = branch + "_train_seconds"
+        for key in TIME_KEYS:
+            absent = variant == "spectral_only"
+            assert history[0][key] is None
             assert history[1][key] == 0 if absent else history[1][key] > 0
             assert self_times[key]["total_seconds"] == 0 if absent else self_times[key]["total_seconds"] is None
             if not absent:
                 assert self_times[key]["recorded_epochs"] == 1 and self_times[key]["expected_epochs"] == 2
-        assert abs(self_times["train_seconds"]["total_seconds"] - sum(row["train_seconds"] for row in history)) < 1e-9
-        assert "Spectral Times=" in (folder / "training.log").read_text(encoding="utf-8")
-        assert "完整总时长未知" in (folder / "report.md").read_text(encoding="utf-8")
+        assert "T2 Conv Forward=" in (folder / "training.log").read_text(encoding="utf-8")
+        if variant != "spectral_only":
+            assert "完整总时长未知" in (folder / "report.md").read_text(encoding="utf-8")
         runs.append((variant, history))
     with patch("train.train_epoch", side_effect=AssertionError("Completed task trained again")):
         run_ablation(cfg, MODEL_VARIANTS, selected, purpose="smoke")

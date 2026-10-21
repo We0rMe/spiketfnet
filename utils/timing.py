@@ -1,14 +1,16 @@
-"""分支前向/反向区间计时与累计；不改计算图、梯度或优化步骤。"""
+"""时域残差模块卷积/LIF 的前向、反向诊断计时；不改模型计算。"""
 
 import math
 import time
 
 import torch
+from torch import nn
+from spikingjelly.activation_based import neuron
 
 
-PARTS = ("spectral", "temporal1", "temporal2", "temporal3")
-TIME_KEYS = tuple(f"{name}_train_seconds" for name in PARTS) + ("train_seconds",)
-TIME_LABELS = ("Spectral Times", "Temporal Times1", "Temporal Times2", "Temporal Times3", "Total Time")
+PARTS = ("temporal2_conv_forward", "temporal2_conv_backward", "temporal2_lif_forward", "temporal2_lif_backward")
+TIME_KEYS = tuple(f"{name}_seconds" for name in PARTS)
+TIME_LABELS = ("T2 Conv Forward", "T2 Conv Backward", "T2 LIF Forward", "T2 LIF Backward")
 HISTORY_KEYS = ("epoch", "loss", "train_acc_percent", "train_trials", *TIME_KEYS,
                 *(key + "_per_trial" for key in TIME_KEYS), "monitor_loss", "monitor_acc_percent")
 
@@ -28,17 +30,21 @@ def graph_nodes(tensors, stop=()):
 
 
 class BranchTimer:
-    """CUDA 用事件记录当前流区间；CPU 用 perf_counter。只在 epoch 末同步 CUDA。"""
+    """只诊断 temporal.blocks 的 Conv1d/LIF；CUDA 事件在 epoch 末统一解析。"""
 
     def __init__(self, model, device, enabled=True):
         self.device, self.enabled = device, enabled
-        self.model = model
-        self.parts = [name for name in PARTS if hasattr(model, "spectral" if name == "spectral" else "temporal")]
+        blocks = getattr(getattr(model, "temporal", None), "blocks", None)
+        self.modules = {}
+        if blocks is not None:
+            for module in blocks.modules():
+                if isinstance(module, nn.Conv1d):
+                    self.modules[module] = "conv"
+                elif isinstance(module, neuron.LIFNode):
+                    self.modules[module] = "lif"
         self.forward_handles, self.backward_handles = [], []
-        self.owners = {}
-        self.intervals = {name: [] for name in self.parts}
-        self.forward_active, self.forward_stamp = None, None
-        self.active, self.backward_start = None, None
+        self.owners, self.starts = {}, {}
+        self.intervals = {(kind, phase): [] for kind in ("conv", "lif") for phase in ("forward", "backward")}
 
     def stamp(self):
         if self.device.type == "cuda":
@@ -49,70 +55,47 @@ class BranchTimer:
 
     def __enter__(self):
         if self.enabled:
-            if hasattr(self.model, "spectral"):
-                self.attach(self.model.spectral, "spectral", root=True, finish=True)
-            if hasattr(self.model, "temporal"):
-                temporal = self.model.temporal
-                self.attach(temporal, "temporal1", root=True, finish=True, output_part="temporal3")
-                self.attach(temporal.current, "temporal1")
-                self.attach(temporal.encoder, "temporal1", capture=False)
-                self.attach(temporal.dropout, "temporal1")
-                self.attach(temporal.blocks, "temporal2")
-                self.attach(temporal.attention, "temporal3")
-                self.attach(temporal.embedding, "temporal3")
-                self.attach(temporal.classifier, "temporal3")
+            for module, kind in self.modules.items():
+                self.forward_handles.append(module.register_forward_pre_hook(self.forward_start))
+                self.forward_handles.append(module.register_forward_hook(self.forward_end))
         return self
 
-    def switch_forward(self, name):
-        if name == self.forward_active:
-            return
-        now = self.stamp()
-        if self.forward_active is not None:
-            self.intervals[self.forward_active].append((self.forward_stamp, now))
-        self.forward_active, self.forward_stamp = name, now
+    def forward_start(self, module, inputs):
+        # 明确排除输入上游的 BN、残差、其他分支，计时不包含归属图遍历。
+        self.owners.update({node: None for node in graph_nodes(inputs, self.owners)})
+        self.starts[module] = self.stamp()
 
-    def attach(self, module, name, root=False, finish=False, output_part=None, capture=True):
-        def start(module, inputs):
-            if root:
-                self.owners.update({node: None for node in graph_nodes(inputs, self.owners)})
-            self.switch_forward(name)
+    def forward_end(self, module, inputs, output):
+        end = self.stamp()
+        kind = self.modules[module]
+        self.intervals[kind, "forward"].append((self.starts.pop(module), end))
+        outputs = (output,)
+        # LIF 重置后的膜电位要到后续仿真步才参与 loss；也必须标注其反向归属。
+        if kind == "lif" and isinstance(module.v, torch.Tensor):
+            outputs += (module.v,)
+        self.owners.update({node: kind for node in graph_nodes(outputs, self.owners)})
 
-        def end(module, inputs, outputs):
-            # 在已标注的输入图处停止，避免把上游模块的反向重复归入下游。
-            # 图遍历本身不算进模块前向时间；池化/跨步平均由外围连续区间覆盖。
-            self.switch_forward(None)
-            self.owners.update({node: output_part or name for node in graph_nodes(outputs, self.owners)})
-            if not finish:
-                self.switch_forward(name)
+    def attach_backward(self, node, kind):
+        started = []
 
-        self.forward_handles.append(module.register_forward_pre_hook(start))
-        if capture:
-            self.forward_handles.append(module.register_forward_hook(end))
+        def before(grad_outputs):
+            started.append(self.stamp())
 
-    def switch_backward(self, name):
-        if name == self.active:
-            return
-        now = self.stamp()
-        if self.active is not None:
-            self.intervals[self.active].append((self.backward_start, now))
-        self.active, self.backward_start = name, now
+        def after(grad_inputs, grad_outputs):
+            self.intervals[kind, "backward"].append((started.pop(), self.stamp()))
 
-    def backward_hook(self, name):
-        def hook(grad_outputs):
-            self.switch_backward(name)
-        return hook
+        # 每个归属节点独立包围，避免把相邻 BN/其他节点或节点间调度空隙算入。
+        self.backward_handles.append(node.register_prehook(before))
+        self.backward_handles.append(node.register_hook(after))
 
     def prepare_backward(self, loss):
-        if not self.enabled:
-            return
-        # 每个 Node 都标注归属；分支梯度若交错执行，切换区间而不重复归入两个分支。
-        # Module full-backward-hook 在原始输入不需梯度时会过早触发，不能作为分支反向终点。
-        for node in graph_nodes((loss,)):
-            self.backward_handles.append(node.register_prehook(self.backward_hook(self.owners.get(node))))
+        if self.enabled:
+            for node in graph_nodes(loss):
+                kind = self.owners.get(node)
+                if kind is not None:
+                    self.attach_backward(node, kind)
 
     def end_backward(self):
-        if self.enabled:
-            self.switch_backward(None)
         for handle in self.backward_handles:
             handle.remove()
         self.backward_handles.clear()
@@ -122,16 +105,15 @@ class BranchTimer:
         if self.enabled and self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         result = {}
-        for name in PARTS:
-            if name not in self.parts:
+        for (kind, phase), pairs in self.intervals.items():
+            if kind not in self.modules.values():
                 seconds = 0.0
             elif not self.enabled:
                 seconds = None
             else:
-                pairs = self.intervals[name]
                 seconds = sum(start.elapsed_time(end) / 1000 if self.device.type == "cuda" else end - start
                               for start, end in pairs)
-            result[f"{name}_train_seconds"] = seconds
+            result[f"temporal2_{kind}_{phase}_seconds"] = seconds
         return result
 
     def __exit__(self, *exc):
@@ -139,6 +121,7 @@ class BranchTimer:
         for handle in self.forward_handles:
             handle.remove()
         self.forward_handles.clear()
+        self.starts.clear()
 
 
 def normalize_history(history, training_trials=None):
@@ -169,8 +152,7 @@ def timing_totals(runs, epochs):
     for key in TIME_KEYS:
         values, expected, trials = [], 0, []
         for variant, history in runs:
-            absent = ((key == "spectral_train_seconds" and variant == "temporal_only") or
-                      (key.startswith("temporal") and variant == "spectral_only"))
+            absent = variant == "spectral_only"
             if absent:
                 continue
             expected += epochs
@@ -208,12 +190,12 @@ def timing_markdown(totals):
         trial = item["seconds_per_trial"]
         trial_text = f"{trial:.6f}" if trial is not None else "未记录"
         lines.append(f"| {label} | {display} | {trial_text} | {item['recorded_epochs']} / {item['expected_epochs']} |")
-    lines += ["", "Temporal Times1：电流映射与 LIF 编码；Times2：全部残差块；Times3：注意力、率读出与输出头。",
-              "各模块累计所有仿真步的前向+反向；融合、loss、Adam、数据搬运等只计入 Total Time。",
-              "Total Time 为训练阶段，不含监测、测试、保存和绘图。模块耗时之和无需等于 Total Time。",
-              "秒/trial = 已记录耗时 / 对应实际处理 trial 次数（重复 epoch 重复计数），是 batch 均摊值，不是单样本延迟。",
-              "多任务汇总按 trial 次数加权，不是各任务平均值的简单平均；累计时长不是双卡墙钟时间。",
-              "旧模块耗时未测量，不能从旧时域总耗时拆分；中断重做但未提交的 epoch 不计入。"]
+    lines += ["", "仅统计第二模块 temporal.blocks：所有膨胀/逐点卷积及所有 LIF，跨残差块和仿真步累计。",
+              "前向按层调用包围；反向按归属 autograd 节点的执行前后包围，含 LIF 跨步膜电位与重置梯度。",
+              "BN、Dropout、残差相加、其他模块、loss 和优化器不计入这四项。四项之和不代表整模块或整轮时间。",
+              "CUDA 使用同一流的 Event，epoch 末同步后读数；区间可能包含提交/调度空闲，不等于纯 kernel 时间。",
+              "秒/trial 是对应已记录样本处理次数上的均摊值；多任务按次数加权，不是单样本延迟或双卡墙钟时间。",
+              "旧 epoch 未记录这四项，保持缺失；中断重做但未提交的 epoch 不计入。"]
     return lines
 
 

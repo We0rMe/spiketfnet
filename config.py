@@ -74,7 +74,7 @@ class Config:
     cpu_threads: int = 4  # CPU 运算线程数
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
     check_gradients: bool = False  # 调试开关：逐 batch 扫描全部梯度；正式训练关闭以减少开销
-    time_branches: bool = True  # 记录频域及三个时域模块的前向+反向耗时；有插桩开销，可关闭
+    time_branches: bool = True  # 仅记录时域第二模块中卷积/LIF 各自的前向与反向耗时；有插桩开销，可关闭
     resume: bool = True  # 同名实验自动跳过完成任务、从上个完整 epoch 恢复
     monitor_every: int = 5  # 每隔若干 epoch 监测源训练被试的 block 1；首/末轮也测，0 禁用
     plot_every: int = 1  # 每隔若干 epoch 覆盖更新曲线和单次报告；不产生逐轮图片

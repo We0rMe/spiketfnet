@@ -1,4 +1,4 @@
-"""真实 v5/v6 四组断点迁移；检查模块计时、训练轨迹与源码归档。"""
+"""真实 v5/v6/v7 四组断点迁移；检查第二模块算子计时与训练轨迹。"""
 
 import io
 import csv
@@ -30,9 +30,9 @@ from utils.timing import PARTS, TIME_KEYS, timing_totals
 import train
 
 
-def main(output_name="module_timing_check", version=6):
-    if version not in (5, 6):
-        raise ValueError("This smoke supports v5 or v6 fixtures")
+def main(output_name="t2_operator_check", version=7):
+    if version not in (5, 6, 7):
+        raise ValueError("This smoke supports v5/v6/v7 fixtures")
     base = ROOT / "smoke_tests/results" / output_name
     base.mkdir(parents=True, exist_ok=False)
     os.environ["MPLCONFIGDIR"] = str(base / "plot_cache")
@@ -47,20 +47,21 @@ def main(output_name="module_timing_check", version=6):
     source = base / f"v{version}_source"
     source.mkdir()
     fixtures = ROOT / "smoke_tests/fixtures"
-    names = SOURCE_NAMES if version == 6 else (
+    names = SOURCE_NAMES if version >= 6 else (
         "train.py", "evaluate.py", "config.py", "model.py", "data.py", "requirements.txt", *LEGACY_SOURCE_PATHS)
     for name in names:
         original = ROOT / LEGACY_SOURCE_PATHS.get(name, name)
-        if version == 6 and (fixtures / "v6" / name).is_file():
-            original = fixtures / "v6" / name
+        if version >= 6 and (fixtures / f"v{version}" / name).is_file():
+            original = fixtures / f"v{version}" / name
         elif version == 5 and name in ("train.py", "evaluate.py"):
             original = fixtures / name.replace(".py", "_v5.py")
         elif version == 5 and name == "training_timing.py":
             original = fixtures / "v6/utils/timing.py"
         (source / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(original, source / name)
-    old_timing = load_module("frozen_timing", fixtures / "v6/utils/timing.py")
-    old_provenance = load_module("frozen_provenance", fixtures / "v6/utils/provenance.py")
+    helpers = fixtures / ("v7" if version == 7 else "v6")
+    old_timing = load_module("frozen_timing", helpers / "utils/timing.py")
+    old_provenance = load_module("frozen_provenance", helpers / "utils/provenance.py")
     with patch.dict(sys.modules, {"training_timing": old_timing, "utils.timing": old_timing,
                                  "utils.provenance": old_provenance}):
         old_eval = load_module("frozen_evaluate", source / "evaluate.py")
@@ -97,18 +98,17 @@ def main(output_name="module_timing_check", version=6):
         before = torch.load(folder / "details/resume.pt", weights_only=True, map_location="cpu")["history"]
         train.run_experiment(group, selected, purpose="smoke")
         after = read_history(folder / "details/history.csv")
-        for key in ("epoch", "loss", "train_acc_percent", "spectral_train_seconds", "train_seconds"):
+        for key in ("epoch", "loss", "train_acc_percent"):
             assert before[0][key] == after[0][key], "Retained history changed"
         assert after[0]["train_trials"] == 16
         for key in TIME_KEYS:
-            absent = variant == ("temporal_only" if key.startswith("spectral") else "spectral_only") and key != "train_seconds"
-            if key.startswith("temporal"):
-                assert after[0][key] is None
+            absent = variant == "spectral_only"
+            assert after[0][key] is None
             assert after[1][key] == 0 if absent else after[1][key] > 0
             assert after[1][key + "_per_trial"] == after[1][key] / 16
         totals = timing_totals([(variant, after)], 2)
-        for part in PARTS[1:]:
-            item = totals[part + "_train_seconds"]
+        for key in TIME_KEYS:
+            item = totals[key]
             if variant == "spectral_only":
                 assert item["total_seconds"] == 0
             else:
@@ -117,14 +117,14 @@ def main(output_name="module_timing_check", version=6):
         header = (folder / "details/history.csv").read_text(encoding="utf-8").splitlines()[0]
         assert "temporal_train_seconds" not in header and "monitor_seconds" not in header
         log = (folder / "training.log").read_text(encoding="utf-8")
-        new_line = next(line for line in log.splitlines() if "Temporal Times1=" in line and "epoch=2/2" in line)
+        new_line = next(line for line in log.splitlines() if "T2 Conv Forward=" in line and "epoch=2/2" in line)
         assert "/trial" not in new_line
         assert not any(token in new_line for token in ("monitor=", "save=", "plot=", "temporal="))
         compare_runs(reference, root, cfg)
         reevaluate_experiment(root, selected, device_name="cpu")
         compare_runs(reference, root, cfg)
         manifest = json.loads((root / "details/experiment.json").read_text(encoding="utf-8"))
-        assert manifest["format_version"] == 7
+        assert manifest["format_version"] == 8
         archive = root / "details/source_resume"
         for name in SOURCE_NAMES:
             assert (archive / name).read_bytes() == (ROOT / name).read_bytes(), name
@@ -150,11 +150,11 @@ def main(output_name="module_timing_check", version=6):
             assert float(row["seconds_per_trial"]) == item["seconds_per_trial"]
     report = (f"# Module timing and resume: PASS\n\n{outcome.testsRun} unit checks passed.\n\n"
               "Real Benchmark S1-S3, 8 trials/subject, S1 held out, seed 42, 500 ms, 2 epochs.\n"
-              f"All four genuine v{version} epoch-1 checkpoints resumed with module timing enabled.\n"
+              f"All four genuine v{version} epoch-1 checkpoints resumed with T2 Conv/LIF forward/backward timing enabled.\n"
               f"Final weights, loss/ACC, monitor metrics and evaluation arrays match uninterrupted v{version} exactly.\n"
-              "Old spectral/total times retained, old temporal breakdown remains unknown; completed tasks skipped.\n"
-              "Epoch log and CSV show only five timings; per-trial means, coverage and cross-group totals verified.\n"
-              "Direct legacy and migrated v7 reevaluation passed; source archives import in a separate process.\n"
+              "Old per-operator times remain unknown; completed tasks skipped, numerical history preserved.\n"
+              "Epoch log and CSV show only four diagnostic timings; per-trial means, coverage and cross-group totals verified.\n"
+              "Direct legacy and migrated v8 reevaluation passed; source archives import in a separate process.\n"
               "Unknown code changes and modified new helper modules are rejected by resume checks.\n"
               "CPU smoke only; no formal 35-fold or GPU training was run.\n")
     (base / "report.md").write_text(report, encoding="utf-8")

@@ -29,6 +29,12 @@ LOG_FORMAT_V7_SOURCES = {
     "utils/provenance.py": "fda11333bed2fc636bafb399a7b7a4af8a0bfdf77aece478ee995cc5005abcd7",
 }
 
+DIAGNOSTIC_V7_SOURCES = {
+    "train.py": "2324625648995eec73635e72d2effab1b6e224c5f1da23169ae962882c0a37bc",
+    "utils/timing.py": "41b340edd8f7f70091794ee816936f1ac7aed38093f910a8ac9dec676b2b6622",
+    "utils/provenance.py": "04024bb5e03db3d48c265049f01f652d9ebda8a5fb0886a0c085385f7b2e67bd",
+}
+
 MODULE_TIMING_V6_SOURCES = {
     "train.py": "35ed6c3c74f353c48e84148289d042680278671bdd29adf3f8379e3e1f619ac6",
     "evaluate.py": "515ceb814c0f8f73c623de0b02be728a27a4f06ac71846c1ca563cafb75ec300",
@@ -117,5 +123,8 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
             continue
         if version == 7 and verified_source_upgrade(name, previous_hash, details, LOG_FORMAT_V7_SOURCES):
             print(f"Verified v7 log-format upgrade: {name}; training and timing calculations preserved.", flush=True)
+            continue
+        if version == 7 and verified_source_upgrade(name, previous_hash, details, DIAGNOSTIC_V7_SOURCES):
+            print(f"Verified v7 T2 diagnostic upgrade: {name}; old operator times remain unknown.", flush=True)
             continue
         raise ValueError(f"Resume source code differs: {name}; unverified changes cannot resume this experiment")

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 from torch import nn
+from spikingjelly.activation_based import neuron
 from torch.utils.data import DataLoader, TensorDataset
 
 from experiments.ablation import run_ablation
@@ -32,44 +33,49 @@ class Tick(torch.autograd.Function):
         return gradient, None, None, None
 
 
-class TimedBranch(nn.Module):
-    def __init__(self, clock, forward_cost, backward_cost):
+class TimedConv(nn.Conv1d):
+    def __init__(self, clock):
+        super().__init__(1, 1, 1)
+        self.clock = clock
+
+    def forward(self, x):
+        return Tick.apply(x * self.weight.flatten()[0], self.clock, 2, 3)
+
+
+class TimedLIF(neuron.LIFNode):
+    def __init__(self, clock):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(1))
-        self.clock, self.forward_cost, self.backward_cost = clock, forward_cost, backward_cost
+        self.clock = clock
 
     def forward(self, x):
-        out = Tick.apply(x * self.weight, self.clock, self.forward_cost, self.backward_cost)
-        return out, out
+        spike = Tick.apply(x + self.v, self.clock, 3, 4)
+        self.v = Tick.apply(spike * 0.5, self.clock, 5, 7)
+        return spike
 
 
-class TimedLayer(TimedBranch):
+class Untimed(nn.Module):
+    def __init__(self, clock):
+        super().__init__()
+        self.clock = clock
+
     def forward(self, x):
-        return super().forward(x)[0]
+        return Tick.apply(x, self.clock, 100, 200)
 
 
 class TimedTemporal(nn.Module):
-    def __init__(self, clock, steps):
+    def __init__(self, clock, steps=4):
         super().__init__()
-        self.clock, self.steps = clock, steps
-        self.current = TimedLayer(clock, 1, 2)
-        self.encoder = TimedLayer(clock, 3, 4)
-        self.dropout = TimedLayer(clock, 5, 6)
-        self.blocks = nn.Sequential(*(TimedLayer(clock, 7, 8) for _ in range(3)))
-        self.attention = TimedLayer(clock, 9, 10)
-        self.embedding = TimedLayer(clock, 11, 12)
-        self.classifier = TimedLayer(clock, 13, 14)
+        self.steps = steps
+        self.current = TimedConv(clock)  # 第二模块外的卷积不能计入。
+        self.encoder = TimedLIF(clock)
+        self.blocks = nn.Sequential(*(nn.Sequential(TimedConv(clock), Untimed(clock), TimedLIF(clock),
+                                                    TimedConv(clock), Untimed(clock), TimedLIF(clock))
+                                      for _ in range(3)))
+        self.attention = TimedConv(clock)
 
     def forward(self, x):
-        current = self.current(x)
-        outputs = []
-        for _ in range(self.steps):
-            spikes = self.dropout(self.encoder(current))
-            features = self.attention(self.blocks(spikes))
-            pooled = Tick.apply(features, self.clock, 15, 16)
-            outputs.append(self.classifier(self.embedding(pooled)))
-        output = Tick.apply(torch.stack(outputs).mean(0), self.clock, 17, 18)
-        return output, output
+        current = self.encoder(self.current(x))
+        return torch.stack([self.attention(self.blocks(current)) for _ in range(self.steps)]).mean(0)
 
 
 class TimingTests(unittest.TestCase):
@@ -100,31 +106,35 @@ class TimingTests(unittest.TestCase):
             for key in ("loss", "train_acc_percent"):
                 self.assertEqual(rows[0][key], rows[1][key])
             self.assertEqual(rows[1]["train_trials"], 3)  # 包括末尾不足一个 batch 的样本。
-            for branch in PARTS:
-                absent = variant == ("temporal_only" if branch == "spectral" else "spectral_only")
-                key = branch + "_train_seconds"
+            for key in TIME_KEYS:
+                absent = variant == "spectral_only"
                 self.assertEqual(rows[0][key], 0 if absent else None)
                 if absent:
                     self.assertEqual(rows[1][key], 0)
                 else:
                     self.assertGreater(rows[1][key], 0)
 
-    def test_backward_time_excludes_shared_work_even_without_input_gradients(self):
-        clock = [0.0]
+    def check_operator_times(self, device, clock):
         model = nn.Module()
-        model.spectral = TimedBranch(clock, 2, 3)
-        model.temporal = TimedTemporal(clock, steps=4)
+        model.spectral = TimedConv(clock)
+        model.temporal = TimedTemporal(clock)
+        with BranchTimer(model, device) as timer:
+            output = model.temporal(torch.ones(1)) + model.spectral(torch.ones(1))
+            loss = Tick.apply(output, clock, 10000, 20000).sum()
+            timer.prepare_backward(loss)
+            loss.backward()
+            timer.end_backward()
+            if device.type == "cuda":
+                torch.cuda.synchronize.assert_not_called()
+            totals = timer.totals()
+        self.assertEqual(totals, dict(zip(TIME_KEYS, (48, 72, 192, 222))))
+        self.assertGreater(clock[0], sum(totals.values()) + 30000)
+        self.assertTrue(all(not module._forward_hooks and not module._forward_pre_hooks for module in model.modules()))
+
+    def test_backward_scope_excludes_bn_shared_work_and_includes_lif_state(self):
+        clock = [0.0]
         with patch("utils.timing.time.perf_counter", side_effect=lambda: clock[0]):
-            with BranchTimer(model, torch.device("cpu")) as timer:
-                f, _ = model.spectral(torch.ones(1))
-                t, _ = model.temporal(torch.ones(1))
-                loss = Tick.apply(f + t, clock, 100, 200).sum()
-                timer.prepare_backward(loss)
-                loss.backward()
-                timer.end_backward()
-                self.assertEqual(timer.totals(), {"spectral_train_seconds": 5, "temporal1_train_seconds": 75,
-                                                 "temporal2_train_seconds": 180, "temporal3_train_seconds": 435})
-        self.assertEqual(clock[0], 995)
+            self.check_operator_times(torch.device("cpu"), clock)
 
     def test_cuda_event_path_synchronizes_once_at_epoch_end(self):
         clock = [0.0]
@@ -139,50 +149,40 @@ class TimingTests(unittest.TestCase):
             def elapsed_time(self, other):
                 return (other.at - self.at) * 1000
 
-        model = nn.Module()
-        model.spectral = TimedBranch(clock, 2, 3)
         with patch("torch.cuda.Event", Event), patch("torch.cuda.current_stream"), patch("torch.cuda.synchronize") as sync:
-            with BranchTimer(model, torch.device("cuda:0")) as timer:
-                out, _ = model.spectral(torch.ones(1))
-                loss = out.sum()
-                timer.prepare_backward(loss)
-                loss.backward()
-                timer.end_backward()
-                sync.assert_not_called()
-                self.assertEqual(timer.totals(), {"spectral_train_seconds": 5, "temporal1_train_seconds": 0,
-                                                 "temporal2_train_seconds": 0, "temporal3_train_seconds": 0})
-                sync.assert_called_once_with(torch.device("cuda:0"))
+            self.check_operator_times(torch.device("cuda:0"), clock)
+            sync.assert_called_once_with(torch.device("cuda:0"))
 
     def test_history_coverage_missing_old_epochs_and_absent_branch(self):
-        history = [{"train_seconds": 10}, {"train_seconds": 12, "spectral_train_seconds": 2, "temporal_train_seconds": 3}]
+        key = TIME_KEYS[0]
+        history = [{"temporal2_train_seconds": 10}, {key: 2, "train_trials": 4}]
         totals = timing_totals([("full", history)], 2)
-        self.assertEqual(totals["train_seconds"]["total_seconds"], 22)
-        self.assertIsNone(totals["spectral_train_seconds"]["total_seconds"])
-        self.assertEqual(totals["spectral_train_seconds"]["recorded_seconds"], 2)
-        self.assertEqual(totals["spectral_train_seconds"]["recorded_epochs"], 1)
-        self.assertEqual(timing_totals([("spectral_only", history)], 2)["temporal1_train_seconds"]["total_seconds"], 0)
-        combined = timing_totals([("full", history), ("full", history)], 2)
-        self.assertEqual(combined["train_seconds"]["total_seconds"], 44)
-        self.assertEqual(combined["temporal1_train_seconds"]["expected_epochs"], 4)
-        self.assertIsNone(combined["temporal1_train_seconds"]["recorded_seconds"])
+        self.assertIsNone(totals[key]["total_seconds"])
+        self.assertEqual(totals[key]["recorded_seconds"], 2)
+        self.assertEqual(totals[key]["recorded_epochs"], 1)
+        self.assertEqual(totals[key]["seconds_per_trial"], 0.5)
+        self.assertEqual(timing_totals([("spectral_only", history)], 2)[key]["total_seconds"], 0)
+        combined = timing_totals([("full", history), ("temporal_only", history)], 2)
+        self.assertEqual(combined[key]["recorded_seconds"], 4)
+        self.assertEqual(combined[key]["expected_epochs"], 4)
+        self.assertIsNone(combined[TIME_KEYS[1]]["recorded_seconds"])
 
     def test_trial_means_use_matching_sample_counts_and_keep_unknown_history(self):
-        history = normalize_history([{"train_seconds": 8, "temporal_train_seconds": 6,
-                                      "monitor_seconds": 2, "train_trials": 4},
-                                     {"train_seconds": 18, "temporal1_train_seconds": 6, "train_trials": 6}])
+        key = TIME_KEYS[0]
+        history = normalize_history([{key: 8, "temporal_train_seconds": 6, "monitor_seconds": 2, "train_trials": 4},
+                                     {key: 18, "train_trials": 6}])
         self.assertNotIn("temporal_train_seconds", history[0])
         self.assertNotIn("monitor_seconds", history[0])
-        self.assertEqual(history[0]["train_seconds_per_trial"], 2)
+        self.assertEqual(history[0][key + "_per_trial"], 2)
         totals = timing_totals([("full", history)], 2)
-        self.assertEqual(totals["train_seconds"]["seconds_per_trial"], 2.6)
-        self.assertEqual(totals["temporal1_train_seconds"]["seconds_per_trial"], 1)
-        self.assertIsNone(totals["temporal1_train_seconds"]["total_seconds"])
-        self.assertEqual(totals["temporal1_train_seconds"]["recorded_trials"], 6)
+        self.assertEqual(totals[key]["seconds_per_trial"], 2.6)
+        self.assertEqual(totals[key]["recorded_trials"], 10)
         self.assertEqual(set(totals), set(TIME_KEYS))
         line = timing_log(history[1])
         self.assertNotIn("/trial", line)
-        self.assertIn("Temporal Times1=6.000s", line)
+        self.assertIn("T2 Conv Forward=18.000s", line)
         self.assertNotIn("monitor=", line)
+        self.assertNotIn("Total Time", line)
 
     def test_single_group_selection_names_folder_without_mutating_main_config(self):
         results = PROJECT_ROOT / "smoke_tests/results"

@@ -107,7 +107,7 @@ M=1 时跨种子的总体方差为零，不代表结果稳定；可查看跨被�
 真实逐 trial 预测、身份及辅助输出保留在 evaluation.npz，不另存重复预测文件。
 ITR 沿用原公式，500 ms 时选择周期为 0.5 + 0.5 = 1.0 s。
 
-新版实验清单为 v7。已审查的 v4/v5/v6 四组断点可迁移到整理后的目录结构；旧 v3 完整模型断点只有在归档的 train/evaluate 与已审查摘要相符、model/data 不变、科学配置兼容时才允许迁移；v2 原有迁移规则仍保留。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。
+新版实验清单为 v8。已审查的 v4/v5/v6/v7 四组断点可迁移到整理后的目录结构；旧 v3 完整模型断点只有在归档的 train/evaluate 与已审查摘要相符、model/data 不变、科学配置兼容时才允许迁移；v2 原有迁移规则仍保留。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。
 旧配置缺少 model_variant 时解释为 full，不放宽未知源码变更的校验。
 升级服务器前应先停止旧进程及其子进程，再同步代码，保留结果目录和原配置，以 `python train.py` 继续原完整模型实验。
 原 1000 ms 实验使用原输出路径，消融使用新根目录，不移动旧权重。
@@ -117,23 +117,9 @@ ITR 沿用原公式，500 ms 时选择周期为 0.5 + 0.5 = 1.0 s。
 完整模型对每个 batch 依次计算频域、时域分支，再融合；主 CE 与辅助 CE 相加后只调用一次 backward 和一次 Adam.step，两个分支及融合模块联合优化。
 没有分别预训练后再融合，也没有把同一个模型的两个分支分放到两张卡。两张卡运行的是不同 LOSO 任务。
 
-`CONFIG.time_branches=True` 默认开启模块计时，所有组一致。每个 epoch 仅显示五项累计时间，平均每 trial 只保留在 CSV 和报告中：
+`CONFIG.time_branches=True` 当前只开启第二模块的算子诊断。日志只显示 T2 Conv Forward / T2 Conv Backward / T2 LIF Forward / T2 LIF Backward 四项秒数；所有残差块与仿真步汇总，不显示 trial 均值。full、temporal_only、equal_fusion 使用同一计时范围，spectral_only 四项为 0。
 
-```text
-Spectral Times=...s | Temporal Times1=...s | Temporal Times2=...s | Temporal Times3=...s | Total Time=...s
-```
-
-Times1 包含 current 的 Conv/BN、LIF 编码及 Dropout；Times2 包含全部堆叠残差块；Times3 包含脉冲注意力、token 平均读出、嵌入/辅助分类头、跨仿真步平均。三个模块累计所有仿真步的前向与反向，未改变模型结构或优化步骤。Spectral Times 保留整个频域分支的前向与反向。
-
-Total Time 是训练阶段墙钟时间，包含融合、loss、Adam、数据读取/搬运及计时开销，不含监测、测试、保存和绘图。四个模块之和不需要等于 Total Time。CUDA 用事件，CPU 用 perf_counter；反向按节点归属切换互不重叠的区间，避免将上游反向重复计入下游。CUDA 不逐 batch 强制同步。这是执行区间计时，包含部分调度开销，不是纯 kernel 时间。
-
-平均每 trial = 耗时 / 对应实际处理的 trial 次数，包含不满 batch 的样本；每个 epoch 重复处理的 trial 重复计数。这是 batch 均摊值，不代表单 trial 独立延迟。汇总按实际 trial 次数加权。
-
-每个 epoch 的时间保存在 training.log；时间与均摊值保存在 details/history.csv，CSV 单位为秒、秒/trial。每次完整训练的 report.md，以及组级 report.md/summary.csv、批次 report.md/comparison.csv 均保留这五项累计、平均每 trial 和计时覆盖率。`variant=all_selected, window_ms=all, scope=training_time_total` 是全部已选组的合计。完整总时长放在 total_seconds，部分记录放在 recorded_seconds；seconds_per_trial 对应同一已记录部分，recorded_trials 是其分母。没有新增单独的计时结果文件。
-
-时域总计、monitor/save/plot 等旧时间字段从新输出移除；loss、ACC 和监测指标保留。旧日志原文不改写。缺少三个模块计时的旧 epoch 不能拆分补造，显示缺失与覆盖率；旧整体/频域时间可继续累计。已完成任务只更新报告与历史列，不为补测耗时重训。消融删除的模块为 0；关闭计时的现存模块为 NA。
-
-完整累计仅包含成功提交的 epoch，既不含中断丢弃的部分，也不是双卡从启动到结束的墙钟时间。更多说明见 [运行说明](../README.md)。
+数据继续保存在原 history.csv、report.md 和组级/批次汇总；旧 epoch 的四项诊断缺失不会补造。模型与训练计算保持不变，计时、同步排查及研究依据详见 [第二模块诊断与排查](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
 
 ## 本地验证
 

@@ -9,7 +9,6 @@ import platform
 import random
 import shutil
 import sys
-import time
 import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -358,19 +357,17 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
     write_json(private / "provenance.json", provenance)
     print(f"TRAIN {len(training_rows)} trials; MONITOR {len(monitor_rows)} source block-1 trials (NOT validation); "
           f"TEST {len(test_rows)} trials after epoch {cfg.epochs} only.", flush=True)
-    print(f"MODEL {cfg.model_variant}; branch timing={'ON' if cfg.time_branches else 'OFF'} "
-          "(branch forward+backward only; fusion/loss/Adam/I/O remain in overall train time).", flush=True)
+    print(f"MODEL {cfg.model_variant}; T2 Conv/LIF timing={'ON' if cfg.time_branches else 'OFF'} "
+          "(four totals: Conv forward/backward, LIF forward/backward; other operations excluded).", flush=True)
     with preserved_rng(generator, device):
         update_run_artifacts(folder, cfg, history, provenance)
     try:
         for epoch in range(len(history) + 1, cfg.epochs + 1):
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
-            started = time.perf_counter()
             row = {"epoch": epoch, **train_epoch(model, train_loader, optimizer, cfg, device)}
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
-            row["train_seconds"] = time.perf_counter() - started
             if cfg.monitor_every and (epoch == 1 or epoch % cfg.monitor_every == 0 or epoch == cfg.epochs):
                 row.update(monitor_training(model, dataset, monitor_rows, cfg, device, generator))
             row = normalize_history([row])[0]
@@ -537,7 +534,7 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
                 "dataset_fingerprint": prepared.metadata["fingerprint"], "code_sha256": code_hashes,
                 "selected_trial_count": len(prepared.ids), "selection": "final epoch only; no target-dependent selection",
                 "statistics": "Population variance by default, not standard deviation; ITR computed per subject/seed first"}
-    manifest.update(format_version=7, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
+    manifest.update(format_version=8, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
                     monitoring="Source training block 1 in eval mode; no validation set or test-based selection")
     if previous is not None:
         manifest["created_utc"] = previous["created_utc"]
