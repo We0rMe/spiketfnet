@@ -11,10 +11,10 @@ import torch
 from spikingjelly.activation_based import neuron
 from torch.utils.data import DataLoader
 
-from config import CONFIG, Config
+from config import CONFIG, PROJECT_ROOT, Config
 from data import WindowDataset, file_sha256, prepare_data
-from ablation_model import build_model
-from training_timing import timing_markdown, timing_rows, timing_totals
+from experiments.variants import build_model
+from utils.timing import normalize_history, timing_markdown, timing_rows, timing_totals
 
 
 def write_text(path, text):
@@ -28,8 +28,11 @@ def read_history(path):
     if not Path(path).exists():
         return []
     with Path(path).open(newline="", encoding="utf-8") as handle:
-        return [{key: (int(value) if key == "epoch" else float(value)) if value else None
+        rows = [{key: (int(value) if key in ("epoch", "train_trials") else float(value)) if value else None
                  for key, value in row.items()} for row in csv.DictReader(handle)]
+    provenance = Path(path).parent / "provenance.json"
+    count = json.loads(provenance.read_text(encoding="utf-8")).get("training_trials") if provenance.exists() else None
+    return normalize_history(rows, count)
 
 
 def plot_training(history, destination, title):
@@ -95,9 +98,7 @@ def write_run_report(folder, cfg, history, provenance):
              f"测试 trial：{provenance['test_trials']}。",
              "", "| 训练观察 | 最新记录 |", "| --- | ---: |",
              f"| 训练联合 loss（Dropout 开） | {number(last.get('loss'))} |",
-             f"| 训练 ACC %（Dropout 开） | {number(last.get('train_acc_percent'))} |",
-             f"| 已记录训练用时，不含监测/保存/绘图（分钟） | "
-             f"{sum(row.get('train_seconds') or 0 for row in history) / 60:.2f} |"]
+             f"| 训练 ACC %（Dropout 开） | {number(last.get('train_acc_percent'))} |"]
     if monitored:
         lines += [f"| 训练子集监测 epoch | {monitored[-1]['epoch']} |",
                   f"| 训练子集监测联合 loss（Dropout 关） | {number(monitored[-1]['monitor_loss'])} |",
@@ -338,8 +339,9 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
         cfg = replace(cfg, evaluation_device=device_name)
     if file_sha256(Path(__file__).with_name("model.py")) != manifest["code_sha256"]["model.py"]:
         raise ValueError("Model source changed; use the archived source to replay this experiment")
-    if manifest.get("format_version", 1) >= 4 and file_sha256(Path(__file__).with_name(
-            "ablation_model.py")) != manifest["code_sha256"]["ablation_model.py"]:
+    variant_key = "experiments/variants.py" if manifest.get("format_version", 1) >= 6 else "ablation_model.py"
+    if manifest.get("format_version", 1) >= 4 and file_sha256(
+            PROJECT_ROOT / "experiments/variants.py") != manifest["code_sha256"][variant_key]:
         raise ValueError("Ablation model source changed; use the archived source")
     prepared = prepare_data(cfg) if prepared is None else prepared.validate(cfg)
     if prepared.metadata["fingerprint"] != manifest["dataset_fingerprint"]:

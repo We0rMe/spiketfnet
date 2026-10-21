@@ -9,8 +9,9 @@ import numpy as np
 from config import ABLATION_CONFIG, ABLATION_GROUPS, PROJECT_ROOT
 from data import file_sha256, prepare_data
 from evaluate import aggregate_matrix, read_history, run_path, write_text
-from train import SOURCE_NAMES, experiment_lock, run_experiment, validate_resume
-from training_timing import timing_markdown, timing_rows, timing_totals
+from train import experiment_lock, run_experiment
+from utils.provenance import SOURCE_NAMES, validate_resume
+from utils.timing import timing_markdown, timing_rows, timing_totals
 
 
 def summarize_ablation(cfg, variants):

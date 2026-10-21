@@ -18,8 +18,10 @@ ABLATION_ROOT = CONFIG.output_root / "ablation"
 服务器使用 `device="cuda"`、`gpu_ids=(0, 1)`，然后在项目根目录执行：
 
 ```bash
-python ablation.py
+python -m experiments.ablation
 ```
+
+在项目根目录执行。消融入口和模型变体集中在 `experiments/`，仍共享根目录的配置、数据、训练和评估脚本；结果路径与整理前相同。
 
 按配置顺序逐组训练；每组内部两张 GPU 分担独立的窗口/被试/种子任务，每张卡一个进程。
 单模型的 batch size、学习率和数据划分保持原样。`device="cuda:0"` 则仅使用第一张卡。
@@ -30,7 +32,7 @@ python ablation.py
 ABLATION_GROUPS = ("spectral_only",)
 ```
 
-运行哪个组只需修改上述一行，然后执行同一个 `python ablation.py`。组名、窗口、被试和种子目录全部自动命名，不需要逐组修改 experiment_name。
+运行哪个组只需修改上述一行，然后执行同一个 `python -m experiments.ablation`。组名、窗口、被试和种子目录全部自动命名，不需要逐组修改 experiment_name。
 `Config.experiment_name` 只控制 `python train.py` 的普通完整模型实验目录。
 
 窗口仍可选择，例如 `ABLATION_WINDOWS_MS=(500, 1000)`，已选组统一应用这些窗口。
@@ -40,7 +42,7 @@ ABLATION_GROUPS = ("spectral_only",)
 
 ## 模型与损失的约定
 
-`model.py` 原模型实现保持不变。`ablation_model.py` 复用其中的频域/时域编码器、融合空间投影和最终分类头。
+`model.py` 原模型实现保持不变。`experiments/variants.py` 复用其中的频域/时域编码器、融合空间投影和最终分类头。
 设 `zf`、`zt` 是原融合模块中各自投影后的特征，`C` 是原来的最终线性分类头。
 
 | 组别 | 最终分类路径 | 损失 |
@@ -92,7 +94,7 @@ results/ablation/
       details/               # history.csv、model.pt、evaluation.npz、provenance.json
 ```
 
-每组沿用实时日志、覆盖更新的曲线及每 epoch 滚动恢复文件 `details/resume.pt`。`resume=True` 时再次执行 `python ablation.py` 即可续训；完成的任务跳过，不重复训练。
+每组沿用实时日志、覆盖更新的曲线及每 epoch 滚动恢复文件 `details/resume.pt`。`resume=True` 时再次执行 `python -m experiments.ablation` 即可续训；完成的任务跳过，不重复训练。
 窗口、折和种子仍各自独立。恢复校验包括组别、配置、源码和数据，不能将 full 的断点当成其他组的起点。
 
 `comparison.csv` 的 ACC/ITR 行只汇总本次配置选中的、在该窗口下所有请求折/种子均完成的组。分别列出跨被试与跨种子的均值和方差。
@@ -105,7 +107,7 @@ M=1 时跨种子的总体方差为零，不代表结果稳定；可查看跨被�
 真实逐 trial 预测、身份及辅助输出保留在 evaluation.npz，不另存重复预测文件。
 ITR 沿用原公式，500 ms 时选择周期为 0.5 + 0.5 = 1.0 s。
 
-新版实验清单为 v5。已审查的 v4 四组断点可迁移到计时版本；旧 v3 完整模型断点只有在归档的 train/evaluate 与已审查摘要相符、model/data 不变、科学配置兼容时才允许迁移；v2 原有迁移规则仍保留。
+新版实验清单为 v7。已审查的 v4/v5/v6 四组断点可迁移到整理后的目录结构；旧 v3 完整模型断点只有在归档的 train/evaluate 与已审查摘要相符、model/data 不变、科学配置兼容时才允许迁移；v2 原有迁移规则仍保留。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。
 旧配置缺少 model_variant 时解释为 full，不放宽未知源码变更的校验。
 升级服务器前应先停止旧进程及其子进程，再同步代码，保留结果目录和原配置，以 `python train.py` 继续原完整模型实验。
 原 1000 ms 实验使用原输出路径，消融使用新根目录，不移动旧权重。
@@ -115,34 +117,30 @@ ITR 沿用原公式，500 ms 时选择周期为 0.5 + 0.5 = 1.0 s。
 完整模型对每个 batch 依次计算频域、时域分支，再融合；主 CE 与辅助 CE 相加后只调用一次 backward 和一次 Adam.step，两个分支及融合模块联合优化。
 没有分别预训练后再融合，也没有把同一个模型的两个分支分放到两张卡。两张卡运行的是不同 LOSO 任务。
 
-`CONFIG.time_branches=True` 默认开启分支计时，所有组一致。每轮日志例如：
+`CONFIG.time_branches=True` 默认开启模块计时，所有组一致。每个 epoch 仅显示五项时间，并在括号中显示该 epoch 平均 ms/trial：
 
 ```text
-spectral=12.345s temporal=23.456s train=40.12s monitor=... save=... plot=... total=...
+Spectral Times=...s (...ms/trial) | Temporal Times1=...s (...ms/trial) | Temporal Times2=...s (...ms/trial) | Temporal Times3=...s (...ms/trial) | Total Time=...s (...ms/trial)
 ```
 
-- spectral / temporal：现有 SpectralBranch / TemporalBranch 模块自身的前向 + 反向，包括其嵌入及辅助分类头。
-- train：整个训练 epoch 的墙钟时间，包括数据读取/搬运、两个分支、融合投影/门控/最终分类头、loss、Adam 和计时插桩开销。
-- total：原有的整轮耗时，还包括监测、保存、绘图；三项训练累计使用 train，不使用 total。
+Times1 包含 current 的 Conv/BN、LIF 编码及 Dropout；Times2 包含全部堆叠残差块；Times3 包含脉冲注意力、token 平均读出、嵌入/辅助分类头、跨仿真步平均。三个模块累计所有仿真步的前向与反向，未改变模型结构或优化步骤。Spectral Times 保留整个频域分支的前向与反向。
 
-融合模块里的两项投影、最终分类头以及损失/优化器不强行分摊到分支，因此 spectral + temporal 不等于 train。
-CUDA 使用当前流上的事件区间，CPU 使用 perf_counter；按反向图节点归属切换计时区间，允许两个分支梯度交错执行而不重复归账。
-CUDA 只在 epoch 末解析事件前同步，不对每个节点/每个分支强制同步。不导出庞大的 profiler trace。
-这属于执行区间计时，包含区间内的调度开销，不等于纯 GPU kernel 时间。插桩本身也有开销；可将 time_branches=False 关闭，此时保留整体训练时间，存在分支的用时标为 NA。
+Total Time 是训练阶段墙钟时间，包含融合、loss、Adam、数据读取/搬运及计时开销，不含监测、测试、保存和绘图。四个模块之和不需要等于 Total Time。CUDA 用事件，CPU 用 perf_counter；反向按节点归属切换互不重叠的区间，避免将上游反向重复计入下游。CUDA 不逐 batch 强制同步。这是执行区间计时，包含部分调度开销，不是纯 kernel 时间。
 
-保存位置：每轮数字在 training.log 和 details/history.csv；每个窗口/被试/种子的 report.md 中列出三项累计秒数/小时数；组级 report.md 与 summary.csv 汇总当前所有窗口、折和种子。
-消融批次 report.md 与 comparison.csv 还汇总当前所有已选组，`variant=all_selected, window_ms=all, scope=training_time_total` 是整批训练总计。
-CSV 中 total_seconds 为完整总时长，recorded_seconds 为已记录部分，recorded_epochs/expected_epochs 表示计时覆盖率。未完整覆盖时 total_seconds 留空。
+平均每 trial = 耗时 / 对应实际处理的 trial 次数，包含不满 batch 的样本；每个 epoch 重复处理的 trial 重复计数。这是 batch 均摊值，不代表单 trial 独立延迟。汇总按实际 trial 次数加权。
 
-多 GPU 汇总是各独立任务耗时相加，不是从开始运行到全部完成的墙钟时长。没有运行的分支为 0；旧 epoch 或关闭计时的 epoch 没有分支数据，不能补造为 0。
-恢复会保留旧整体耗时，从新 epoch 开始记录分支耗时，报告明确显示覆盖率；已完成旧任务只更新报告，不为补计时而重训。
-累计以已提交的 epoch 历史为准，不包括中断后被丢弃并重做的部分 epoch，也不包含监测、最终测试、保存及绘图时间。
+每个 epoch 的时间与均摊值仍保存在 training.log 和 details/history.csv；CSV 单位为秒、秒/trial。每次完整训练的 report.md，以及组级 report.md/summary.csv、批次 report.md/comparison.csv 均保留这五项累计、平均每 trial 和计时覆盖率。`variant=all_selected, window_ms=all, scope=training_time_total` 是全部已选组的合计。完整总时长放在 total_seconds，部分记录放在 recorded_seconds；seconds_per_trial 对应同一已记录部分，recorded_trials 是其分母。没有新增单独的计时结果文件。
+
+时域总计、monitor/save/plot 等旧时间字段从新输出移除；loss、ACC 和监测指标保留。旧日志原文不改写。缺少三个模块计时的旧 epoch 不能拆分补造，显示缺失与覆盖率；旧整体/频域时间可继续累计。已完成任务只更新报告与历史列，不为补测耗时重训。消融删除的模块为 0；关闭计时的现存模块为 NA。
+
+完整累计仅包含成功提交的 epoch，既不含中断丢弃的部分，也不是双卡从启动到结束的墙钟时间。更多说明见 [运行说明](../README.md)。
 
 ## 本地验证
 
 ```powershell
 .venv/Scripts/python.exe smoke_tests/run_ablation_smoke.py
 .venv/Scripts/python.exe smoke_tests/run_timing_smoke.py
+.venv/Scripts/python.exe smoke_tests/run_layout_smoke.py
 ```
 
 所有测试脚本、旧版验证样本和产物位于 smoke_tests；默认写 smoke_tests/results/ablation_check，已存在时拒绝覆盖。

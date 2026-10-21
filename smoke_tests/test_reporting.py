@@ -14,7 +14,8 @@ from config import CONFIG, PROJECT_ROOT
 from data import PreparedData, file_sha256
 from evaluate import write_json
 from model import SpikeTFNet
-from train import monitor_training, rng_state, run_experiment, verified_reporting_upgrade
+from train import monitor_training, rng_state, run_experiment
+from utils.provenance import verified_reporting_upgrade
 
 
 class ReportingTests(unittest.TestCase):

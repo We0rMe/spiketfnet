@@ -19,7 +19,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import numpy as np
 import torch
 
-from ablation import run_ablation
+from experiments.ablation import run_ablation
 from config import CONFIG
 from data import prepare_data
 from evaluate import read_history, reevaluate_experiment, run_path
@@ -32,7 +32,11 @@ MODEL_VARIANTS = ("full", "spectral_only", "temporal_only", "equal_fusion")
 def load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    from experiments import variants
+    from utils import timing
+    with patch.dict(sys.modules, {"ablation_model": variants,
+                                 "training_timing": sys.modules.get("training_timing", timing)}):
+        spec.loader.exec_module(module)
     return module
 
 

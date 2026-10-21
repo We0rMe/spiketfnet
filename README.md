@@ -11,7 +11,16 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 | `model.py` | 频域分支、脉冲时域分支、门控及联合损失 |
 | `train.py` | N 折 × M 种子训练；只测试固定最后一轮权重 |
 | `evaluate.py` | ACC/ITR、分层统计及已保存模型的重新评估 |
+| `experiments/ablation.py` | 消融批次入口、组间汇总；复用根目录的训练与评估流程 |
+| `experiments/variants.py` | 原始模型与消融组的构建、各组损失；复用 `model.py` 中的分支 |
+| `utils/timing.py` | 分支计时与耗时统计 |
+| `utils/provenance.py` | 源码归档清单、历史版本认证与断点兼容校验 |
+| `docs/` | 复现计划、实现约定及消融运行说明 |
 | `smoke_tests/` | 全部冒烟脚本与结果；与正式实验隔离 |
+
+前期结构梳理归档见 [复现计划](docs/REPRODUCTION_PLAN.zh-CN.md)，当前运行参数以 `config.py` 和实现说明为准。
+
+在项目根目录执行所有运行命令。普通训练用 `python train.py`，消融实验用 `python -m experiments.ablation`；不要直接运行包内文件。所有可修改参数仍集中在 `config.py`。后续分支改进可在 `experiments/` 扩展实验，继续共享数据、训练和评估流程。
 
 ## 运行
 
@@ -69,31 +78,41 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 ## 消融实验
 
-新增 `python ablation.py`，默认 Benchmark、500 ms、35 折、单种子，运行 full / spectral_only / temporal_only / equal_fusion 四组。
+新增 `python -m experiments.ablation`，默认 Benchmark、500 ms、35 折、单种子，运行 full / spectral_only / temporal_only / equal_fusion 四组。
 在 `config.py` 末尾只修改 `ABLATION_GROUPS` 选择组别，修改 `ABLATION_WINDOWS_MS` 选择窗口；N/M/seed、设备和其余训练设置继承 CONFIG。
 例如 `ABLATION_GROUPS = ("spectral_only",)` 只运行频域组，默认四项列表则依次运行全部四组。
 结果子目录按组名自动生成，不需要逐组修改 experiment_name。Config.model_variant 是内部记录字段，ABLATION_CONFIG 是派生配置，都不作为运行选择入口。
 结果位于 `results/ablation/<组别>/`，各组独立恢复；总表为 `results/ablation/comparison.csv`。
 单分支保留对应融合投影和最终分类头，等权组使用固定 0.5/0.5。详见 [消融运行与实现约定](docs/ABLATION.zh-CN.md)。
 
-新版清单为 v5，支持经归档源码摘要验证的旧 v4 四组及 v3 完整模型断点迁移；原 `model.py` 和 `data.py` 未改动，旧完整模型仍以 `python train.py` 继续。
+新版清单为 v7，源码快照保留 `experiments/`、`utils/` 的目录结构。支持经归档源码摘要验证的旧 v4/v5/v6 四组及 v3 完整模型断点迁移；原 `model.py` 和 `data.py` 未改动，旧完整模型仍以 `python train.py` 继续。
 新消融实验不能接续其他组权重。验证说明见消融文档和 smoke_tests/results/timing_check/report.md。
 
 ## 耗时和恢复
 
-每个 epoch 输出一行，包含设备、窗口、测试被试、种子、loss、训练 ACC，以及 `train`、`monitor`、`save`、`plot`、`total` 秒数。`train` 在 CUDA 同步后计时，涵盖 DataLoader、传输、前反向和优化；其余依次是训练子集监测、checkpoint/历史写盘、曲线/报告更新与本轮总耗时，不包括初始预处理及最终测试。该行实时追加到任务根目录 `training.log` 并 flush；错误栈和恢复信息也保留。主进程调度日志在实验 `details/experiment.log`，双卡各自写自己的任务日志。
+每个 epoch 实时输出 loss、训练 ACC、源训练子集监测指标，以及以下五项时间；不再输出时域总计、monitor/save/plot 等其他时间。
 
-`time_branches=True` 时，还输出 `spectral` / `temporal` 两个分支自身模块的前向+反向累计时间，保存到同一 history.csv。
-完整模型是每个 batch 一次联合 backward 和 Adam.step；分支前向依次执行，不是分别训练好后再融合，也没有把两个分支分别放到两张 GPU。
-融合投影、门控、最终分类头、loss、优化器和数据搬运只计入整体 train，不分摊给两个分支。CUDA 用事件区间、CPU 用墙钟；计时有插桩开销，可关闭。
-任务 report.md、实验 report.md/summary.csv 及消融批次 comparison.csv 均含三项累计；跨任务累加不是双卡墙钟时长。
-旧分支耗时无法追溯，报告显示已记录/应记录 epoch，完整总时长缺失时不会补 0。已删除分支则明确计为 0。
+| 日志名称 | 计时范围（所有仿真步的前向 + 反向） |
+| --- | --- |
+| Spectral Times | 频域分支，含其嵌入和辅助分类头 |
+| Temporal Times1 | 电流映射 Conv/BN、LIF 直接编码及其 Dropout |
+| Temporal Times2 | 全部堆叠的多尺度膨胀脉冲残差块，整体计时 |
+| Temporal Times3 | 脉冲注意力、token 平均、嵌入/辅助分类头、跨仿真步平均读出 |
+| Total Time | 整个训练 epoch：DataLoader、传输、前反向、融合、loss、Adam 与计时开销 |
+
+`Total Time` 不含监测、测试、保存或绘图，不要求等于四个模块时间之和。`time_branches=True` 开启四个模块的计时；关闭时仍计 Total Time，存在模块显示 NA，消融删除的模块显示 0。CUDA 使用当前流上的事件，CPU 使用 perf_counter；不增加逐 batch 的强制同步。区间内包含调度开销，不是纯 kernel 时间，计时本身也有开销。
+
+每项日志同时显示本 epoch 的秒数与平均 ms/trial。平均每 trial = 该项耗时 / 本 epoch 实际处理 trial 次数，包含末尾不足 batch_size 的 batch；这是 batch 均摊值，不是单 trial 独立运行延迟。完整训练和所有折/种子的平均值按对应 trial 次数加权，不能简单平均各 epoch 或任务的均值。
+
+输出沿用现有文件：`training.log` 实时追加；`details/history.csv` 保存五项 epoch 秒数、`train_trials` 和五项 `_per_trial`（秒/trial）。每个窗口/被试/种子的 `report.md`、实验 `report.md`/`summary.csv`，以及消融批次 `report.md`/`comparison.csv` 保存五项累计与平均每 trial。汇总中 `total_seconds` 仅在计时完整时填写；`recorded_seconds`、`recorded_epochs/expected_epochs` 标明已记录部分，`seconds_per_trial` 使用同一部分的 trial 次数。
+
+v6 及更早历史没有三个时域模块计时，不能由旧时域总计推算。升级后保留原频域和整体时间，三个模块从续训后的 epoch 开始记录；缺失显示 NA/空值及覆盖率，不补零。已有日志保留历史原文，新日志和更新后的 CSV/报告只使用五项时间。跨任务累计是各训练任务之和，不是双 GPU 经过的墙钟时长；未提交且需重做的 epoch 不计入。
 
 每个任务开始时保存 epoch 0，之后每个完整 epoch 原子替换 `details/resume.pt`。该文件包含模型、Adam 状态、epoch、训练历史、Python/NumPy/Torch/CUDA 随机状态和 DataLoader 的打乱生成器状态。中途停止后，执行同一条 `python train.py` 即从最后成功保存的 epoch 后继续；当前未保存的 epoch 会重做。最终测试成功后删除恢复文件，只保留 `model.pt`。checkpoint 是恢复用途，测试仍只使用固定最后一轮模型。
 
 恢复会校验数据指纹、trial 身份、模型/预处理和训练设置。可调整 N、M、起始 seed 和设备分配；学习率、batch size、epoch 总数、网络参数、确定性设置变化必须使用新实验名。窗口修改仍要求预处理指纹一致。新格式还校验训练与评估代码哈希；环境或 CPU/CUDA 后端变化不保证逐位相同，运行环境会记入恢复记录。
 
-断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2/v3/v4 train/evaluate（兼容 LF/CRLF 换行），才允许升级至 v5。模型、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。
+断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2/v3/v4/v5/v6 源码（兼容 LF/CRLF 换行），才允许升级至 v7。旧消融模型按原名校验并映射到新路径；v5/v6 计时工具仅在固定摘要认证通过后升级。模型、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。
 
 升级步骤：先停止服务器现有训练并确认子进程退出；同步新版代码；保留原 `experiment_name`、数据路径、N/M/seed 和科学参数，保持 `resume=True`；再次运行 `python train.py`。无需重命名、搬动或删除现有结果目录。已完成任务只补充展示文件，不重新训练；未完成任务从 checkpoint 的 epoch 继续。不要在训练仍运行时单独启动 `evaluate.py`。
 
@@ -165,6 +184,7 @@ results/spiketfnet/
 .\.venv\Scripts\python.exe smoke_tests\run_parallel_smoke.py
 .\.venv\Scripts\python.exe smoke_tests\run_resume_smoke.py
 .\.venv\Scripts\python.exe smoke_tests\run_reporting_smoke.py
+.\.venv\Scripts\python.exe smoke_tests\run_layout_smoke.py
 ```
 
 所有临时缓存、报告、训练及评估结果都进入 `smoke_tests/results/`。脚本先做数值与隔离检查，再对真实 S1–S3 数据进行预处理；集成部分取每人 8 个 trial、S1/S2 两折、42/43 两个种子、每次 2 epochs。完整网络尺寸、40 类输出和 Ts=4 保持不变；六个窗口另做形状检查。最后加载四个 checkpoint 重评估，确认 logits 和汇总完全一致。
@@ -176,3 +196,5 @@ results/spiketfnet/
 `run_resume_smoke.py` 输出到 `smoke_tests/results/resume_check/`，模拟第 1 个 epoch 后中断，再以两个 CPU 进程恢复，比较权重、训练指标、预测和汇总（计时值不要求相同）。另验证完成任务跳过、M 缩减、旧版任务升级、写盘失败保留前一 checkpoint 及并发锁。所有冒烟结果均不作为 GPU 速度或正式复现性能依据。
 
 `run_reporting_smoke.py` 使用 `smoke_tests/fixtures/` 中冻结的 v2 源码生成真实旧断点，与新版监测、实时输出及双进程恢复作对照。结果在 `smoke_tests/results/reporting_check/`。冻结源码仅供冒烟测试，不是服务器训练入口。
+
+`run_layout_smoke.py` 默认验证本次修改前 v6 四组的真实断点迁移、三模块计时、trial 均值、旧历史缺失处理、权重/预测一致性和源码归档，结果在 `smoke_tests/results/module_timing_check/`。还可从 Python 调用 `main(output_name="新目录", version=5)` 验证 v5。`run_ablation_smoke.py` 覆盖四组双进程调度与 v3 恢复，`run_timing_smoke.py` 覆盖 v4 四组恢复。所有脚本都仅用于 CPU 小样本冒烟。

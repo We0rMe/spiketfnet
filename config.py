@@ -74,7 +74,7 @@ class Config:
     cpu_threads: int = 4  # CPU 运算线程数
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
     check_gradients: bool = False  # 调试开关：逐 batch 扫描全部梯度；正式训练关闭以减少开销
-    time_branches: bool = True  # 记录两个分支的前向+反向耗时；有插桩开销，可关闭
+    time_branches: bool = True  # 记录频域及三个时域模块的前向+反向耗时；有插桩开销，可关闭
     resume: bool = True  # 同名实验自动跳过完成任务、从上个完整 epoch 恢复
     monitor_every: int = 5  # 每隔若干 epoch 监测源训练被试的 block 1；首/末轮也测，0 禁用
     plot_every: int = 1  # 每隔若干 epoch 覆盖更新曲线和单次报告；不产生逐轮图片
@@ -83,7 +83,7 @@ class Config:
     experiment_name: str = "spiketfnet"  # 同名恢复；换名称可开始全新实验
     probe_trials: int = 4  # 保存供未来效率测量使用的代表性输入数量
 
-    # 内部记录字段，不作为运行选择项修改；ablation.py 自动填入并保存到断点。
+    # 内部记录字段，不作为运行选择项修改；experiments/ablation.py 自动填入并保存到断点。
     model_variant: str = field(default="full", repr=False)
 
     @property
@@ -186,7 +186,7 @@ class Config:
 
 CONFIG = Config()
 
-# 消融运行设置：python ablation.py 只运行下面列出的组，这是唯一的组别选择入口。
+# 消融运行设置：python -m experiments.ablation 只运行下面列出的组，这是唯一的组别选择入口。
 # 单组示例：ABLATION_GROUPS = ("spectral_only",)
 ABLATION_GROUPS = ("full", "spectral_only", "temporal_only", "equal_fusion")
 ABLATION_WINDOWS_MS = (500,)  # 可选窗口，例如 (500, 1000)；对所有已选组一致

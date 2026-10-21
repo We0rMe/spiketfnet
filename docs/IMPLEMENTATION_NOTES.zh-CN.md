@@ -83,6 +83,20 @@ SpikingJelly 的输入衰减和硬重置语义依据其 [LIFNode 文档](https:/
 
 运行组仅由 ABLATION_GROUPS 选择，窗口由 ABLATION_WINDOWS_MS 设置，ABLATION_ROOT 控制批次根目录；组名/窗口/被试/种子子目录自动生成。model_variant 留作内部快照字段，不作为用户选择入口。
 
-完整模型在同一 batch 内联合训练，一次 backward/Adam.step 更新所有保留参数。training_timing.py 用前向模块边界及反向图节点归属记录分支专属区间；融合模块、损失、优化器不分摊给分支。CUDA 事件在 epoch 末统一解析，CPU 用 perf_counter；记录执行区间而非纯 kernel 时间，会有插桩开销。未修改模型/梯度/优化顺序，关闭开关只停计时。
+完整模型在同一 batch 内联合训练，一次 backward/Adam.step 更新所有保留参数。utils/timing.py 用前向模块边界及反向图节点归属记录分支专属区间；融合模块、损失、优化器不分摊给分支。CUDA 事件在 epoch 末统一解析，CPU 用 perf_counter；记录执行区间而非纯 kernel 时间，会有插桩开销。未修改模型/梯度/优化顺序，关闭开关只停计时。
 
 逐 epoch 分支秒数写入原 history.csv 和日志，各级现有汇总增加三项训练累计和覆盖率；跨任务求和不等于双卡墙钟时间。只累计已提交历史，不补造旧 epoch 耗时。v5 增加计时代码哈希校验，允许已审查 v4 四组断点迁移；v2/v3 原迁移边界保留。
+
+## 目录整理（v6）
+
+根目录保留配置、数据、模型、训练、评估五个核心脚本。消融入口迁至 experiments/ablation.py，以 `python -m experiments.ablation` 运行；模型变体迁至 experiments/variants.py。计时迁至 utils/timing.py，断点源码校验收拢到 utils/provenance.py；复现计划归入 docs/。配置值、结果目录及科学计算不变。
+
+源码归档保留包目录，恢复校验支持旧平铺文件名到新路径的映射。仅允许固定摘要认证的 v5 训练/评估代码升级，仍逐项检查原模型、消融模型、预处理、计时及科学参数；已支持的更早版本迁移继续保留。v6 后续恢复也校验新提取的辅助模块，不能以整理目录为由放行未知代码改动。
+
+## 时域三模块计时（v7）
+
+保持 model.py、数据、损失、优化器和参数键名不变，在 utils/timing.py 对现有模块注册临时钩子。Times1 包含 current/encoder/dropout；Times2 包含整个 blocks；Times3 包含 attention、token 平均、embedding/classifier 及跨步平均。所有仿真步累计，辅助分类头归入 Times3；融合投影仍只计入整体训练时间。
+
+前向使用连续区间以覆盖函数式读出操作；收集反向归属时在已标注图节点处停止，避免重复归属上游，图遍历开销留在整体训练时间。反向按 Node 执行切换区间；CUDA 事件在 epoch 结束统一解析。启用/关闭计时不改变前向结果、梯度、随机状态或优化过程。
+
+新输出只保留 Spectral Times、Temporal Times1/2/3、Total Time 五项。平均每 trial 按实际样本处理次数均摊；旧 trial 数仅在已验证 LOSO 划分及无 drop_last 的既有训练流程下恢复。旧时域总计不用于反推三模块数据，历史缺项保持未知。v6 的 train/evaluate/timing/provenance 及 v5 的旧 timing 需通过归档文件和固定摘要认证，才允许升级；数据与模型校验继续执行。原 checkpoint 结构及随机状态恢复协议不变。

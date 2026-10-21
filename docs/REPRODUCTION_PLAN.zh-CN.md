@@ -1,6 +1,6 @@
 **SpikeTFNet：Benchmark 数据集复现计划与结构核对记录**
 
-版本：v0.1（前期分析归档）；日期：2026-10-19。后续已收到第 8 页和用户实施授权，当前参数决策以 [实现说明](G:/SSVEP/SpikeTFNet/docs/IMPLEMENTATION_NOTES.zh-CN.md)、[配置](G:/SSVEP/SpikeTFNet/config.py) 和 [运行说明](G:/SSVEP/SpikeTFNet/README.md) 为准。下文保留当时的分析过程，其中已解决的待定项不再阻止实施。
+版本：v0.1（前期分析归档）；日期：2026-10-19。后续已收到第 8 页和用户实施授权，当前参数决策以 [实现说明](IMPLEMENTATION_NOTES.zh-CN.md)、[配置](../config.py) 和 [运行说明](../README.md) 为准。下文保留当时的分析过程，其中已解决的待定项不再阻止实施。
 
 本轮只完成论文审阅、数据元信息检查和计划制定，未实现模型、未运行训练、未修改原始数据。本文是后续实施基线；用户补充要求后，应更新本文及决策记录，再冻结实验配置。
 

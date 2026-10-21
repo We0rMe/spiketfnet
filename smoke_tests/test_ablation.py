@@ -11,13 +11,14 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from ablation import summarize_ablation
-from ablation_model import build_model, joint_loss
+from experiments.ablation import summarize_ablation
+from experiments.variants import build_model, joint_loss
 from config import CONFIG, PROJECT_ROOT, Config
 from data import PreparedData, file_sha256
 from evaluate import evaluate_model, run_path, write_json
 from model import SpikeTFNet
-from train import ABLATION_V3_SOURCES, seed_everything, validate_resume, verified_source_upgrade
+from train import seed_everything
+from utils.provenance import ABLATION_V3_SOURCES, validate_resume, verified_source_upgrade
 
 MODEL_VARIANTS = ("full", "spectral_only", "temporal_only", "equal_fusion")
 
@@ -151,8 +152,9 @@ class AblationTests(unittest.TestCase):
         for variant in MODEL_VARIANTS[1:]:
             with self.assertRaisesRegex(ValueError, "model_variant"):
                 validate_resume(manifest, replace(self.cfg, model_variant=variant), prepared, "smoke", hashes)
+        hashes = {("experiments/variants.py" if k == "ablation_model.py" else k): v for k, v in hashes.items()}
         with self.assertRaisesRegex(ValueError, "ablation_model.py"):
-            validate_resume(manifest, self.cfg, prepared, "smoke", {**hashes, "ablation_model.py": "changed"})
+            validate_resume(manifest, self.cfg, prepared, "smoke", {**hashes, "experiments/variants.py": "changed"})
 
     def test_v3_upgrade_requires_exact_archived_sources(self):
         results = PROJECT_ROOT / "smoke_tests/results"

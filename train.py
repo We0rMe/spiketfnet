@@ -24,11 +24,9 @@ from config import CONFIG, PROJECT_ROOT, Config
 from data import WindowDataset, file_sha256, loso_indices, prepare_data
 from evaluate import (evaluate_model, plot_confusion, plot_training, read_history, refresh_progress,
                       resolve_device, run_path, save_evaluation, summarize_experiment, write_json, write_run_report)
-from ablation_model import build_model, joint_loss
-from training_timing import BranchTimer
-
-SOURCE_NAMES = ("config.py", "data.py", "model.py", "ablation_model.py", "ablation.py",
-                "train.py", "evaluate.py", "training_timing.py", "requirements.txt")
+from experiments.variants import build_model, joint_loss
+from utils.timing import BranchTimer, HISTORY_KEYS, normalize_history, timing_log
+from utils.provenance import SOURCE_NAMES, validate_resume
 
 
 def seed_everything(seed, cfg):
@@ -90,7 +88,8 @@ def train_epoch(model, loader, optimizer, cfg, device):
     finite_parameters = torch.stack([torch.isfinite(p).all() for p in model.parameters()]).all()
     if not finite_parameters:
         raise FloatingPointError("Nonfinite model parameters at epoch end")
-    return {"loss": total_loss.item() / count, "train_acc_percent": 100 * correct.item() / count, **branch_times}
+    return {"loss": total_loss.item() / count, "train_acc_percent": 100 * correct.item() / count,
+            "train_trials": count, **branch_times}
 
 
 class Tee:
@@ -133,7 +132,6 @@ def plot_history(history, destination, title):
 def monitor_training(model, dataset, rows, cfg, device, generator):
     """只读源训练子集；恢复随机状态与模式，不影响后续优化轨迹。"""
     state, was_training = rng_state(generator, device), model.training
-    started = time.perf_counter()
     try:
         loader = DataLoader(Subset(dataset, rows.tolist()), batch_size=cfg.batch_size, shuffle=False,
                             num_workers=0, pin_memory=device.type == "cuda",
@@ -150,8 +148,7 @@ def monitor_training(model, dataset, rows, cfg, device, generator):
         if not len(rows) or not torch.isfinite(loss_sum):
             raise ValueError("Empty or nonfinite training monitor")
         return {"monitor_loss": loss_sum.item() / len(rows),
-                "monitor_acc_percent": correct.item() * 100 / len(rows),
-                "monitor_seconds": time.perf_counter() - started}
+                "monitor_acc_percent": correct.item() * 100 / len(rows)}
     finally:
         model.train(was_training)
         restore_rng(state, generator, device)
@@ -165,7 +162,7 @@ def recover_log(folder, history):
         handle.write("RECOVERED history below is reconstructed from saved CSV/checkpoint, not original console output.\n")
         for row in history:
             handle.write(f"RECOVERED epoch={row['epoch']} loss={row['loss']:.6f} "
-                         f"train_ACC={row['train_acc_percent']:.4f}% train_seconds={row.get('train_seconds')}\n")
+                         f"train_ACC={row['train_acc_percent']:.4f}% {timing_log(row)}\n")
 
 
 def update_run_artifacts(folder, cfg, history, provenance):
@@ -239,11 +236,9 @@ def preserved_rng(generator, device):
 
 def write_history(path, history):
     with path.with_suffix(".tmp").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=("epoch", "loss", "train_acc_percent", "train_seconds",
-                                                    "spectral_train_seconds", "temporal_train_seconds",
-                                                    "monitor_loss", "monitor_acc_percent", "monitor_seconds"))
+        writer = csv.DictWriter(handle, fieldnames=HISTORY_KEYS)
         writer.writeheader()
-        writer.writerows(history)
+        writer.writerows(normalize_history(history))
     path.with_suffix(".tmp").replace(path)
 
 
@@ -277,7 +272,8 @@ def completed_job(folder, job, prepared, cfg):
         if not np.array_equal(arrays["training_ids"], prepared.ids[training_rows]) or not np.array_equal(
                 arrays["test_ids"], prepared.ids[test_rows]):
             raise ValueError(f"Completed run has a different LOSO split: {folder}")
-    history = read_history(private / "history.csv")
+    history = normalize_history(read_history(private / "history.csv"), len(training_rows))
+    write_history(private / "history.csv", history)
     if not (folder / "report.md").exists():
         update_run_artifacts(folder, cfg, history, provenance)
     else:
@@ -351,12 +347,13 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
             shutil.copy2(private / "history.csv", private / "history_before_restart.csv")
             print(f"[{device}] S{subject:02d} seed={seed}: no saved weights; restart from epoch 1", flush=True)
         save_resume(resume_file, model, optimizer, generator, device, history, job, prepared)
+    history = normalize_history(history, len(training_rows))
     write_history(private / "history.csv", history)
     if reconstruct_log and history:
         print("RECOVERED rows below come from saved history, not original console output.", flush=True)
         for row in history:
             print(f"RECOVERED epoch={row['epoch']} loss={row['loss']:.6f} "
-                  f"train_ACC={row['train_acc_percent']:.4f}% train_seconds={row.get('train_seconds')}", flush=True)
+                  f"train_ACC={row['train_acc_percent']:.4f}% {timing_log(row)}", flush=True)
     provenance["resumed_after_epoch"] = len(history)
     write_json(private / "provenance.json", provenance)
     print(f"TRAIN {len(training_rows)} trials; MONITOR {len(monitor_rows)} source block-1 trials (NOT validation); "
@@ -376,27 +373,19 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
             row["train_seconds"] = time.perf_counter() - started
             if cfg.monitor_every and (epoch == 1 or epoch % cfg.monitor_every == 0 or epoch == cfg.epochs):
                 row.update(monitor_training(model, dataset, monitor_rows, cfg, device, generator))
+            row = normalize_history([row])[0]
             history.append(row)
-            saved_at = time.perf_counter()
             save_resume(resume_file, model, optimizer, generator, device, history, job, prepared)
             write_history(private / "history.csv", history)
-            save_seconds = time.perf_counter() - saved_at
-            plot_started = time.perf_counter()
             if epoch % cfg.plot_every == 0 or epoch == 1 or epoch == cfg.epochs:
                 with preserved_rng(generator, device):
                     update_run_artifacts(folder, cfg, history, provenance)
-            plot_seconds = time.perf_counter() - plot_started
             monitor_text = (f"monitor_loss={row['monitor_loss']:.4f} "
                             f"monitor_ACC={row['monitor_acc_percent']:.2f}% (NOT validation) "
-                            if "monitor_loss" in row else "")
-            branch_text = " ".join(f"{name}={row[name + '_train_seconds']:.3f}s"
-                                   if row[name + "_train_seconds"] is not None else f"{name}=NA"
-                                   for name in ("spectral", "temporal"))
+                            if row.get("monitor_loss") is not None else "")
             print(f"[{device}] {window}ms S{subject:02d} seed={seed} epoch={epoch}/{cfg.epochs} "
                   f"loss={row['loss']:.4f} train_ACC={row['train_acc_percent']:.2f}% "
-                  f"{monitor_text}{branch_text} train={row['train_seconds']:.2f}s monitor={row.get('monitor_seconds', 0):.2f}s "
-                  f"save={save_seconds:.2f}s plot={plot_seconds:.2f}s "
-                  f"total={time.perf_counter() - started:.2f}s", flush=True)
+                  f"{monitor_text}{timing_log(row)}", flush=True)
         atomic_torch_save(model.state_dict(), private / "model.pt")
         plot_history(history, folder / "training.png", f"{window} ms | test S{subject:02d} | seed {seed} | {purpose}")
         metrics, arrays = evaluate_model(model, test_loader, cfg, window, device)
@@ -482,77 +471,6 @@ def experiment_lock(details):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-REPORTING_V2_SOURCES = {
-    "train.py": "67e00a4b9018a5be210cd3967760c6203cee4055668bd4569ad98ef65fd40704",
-    "evaluate.py": "1c800e8cc51dfae59ce18ef64af81150011805afceaae5d1e5ed318409cb36dd",
-}
-
-ABLATION_V3_SOURCES = {
-    "train.py": "4fff6ebc49e0b31e23dbccbe598e4a2bac1fb5390b75a361f042431646144edc",
-    "evaluate.py": "dca51e7f17af5f882844a8f9156aca5165d666f311e12b7feae9b347ff9423c3",
-}
-
-TIMING_V4_SOURCES = {
-    "train.py": "8f9a556c95282f7d1b72fa7097cce9cd8f4d4c67be245e96776df9aca5e0bfc5",
-    "evaluate.py": "aeb04d511ac52fb92c5b76ed4869c0ae836e7ca40379bf66b85ef6ccec434f15",
-}
-
-
-def verified_reporting_upgrade(name, old_hash, details):
-    return verified_source_upgrade(name, old_hash, details, REPORTING_V2_SOURCES)
-
-
-def verified_source_upgrade(name, old_hash, details, approved):
-    if details is None or name not in approved:
-        return False
-    for directory in ("source_resume", "source"):
-        source = Path(details) / directory / name
-        if source.is_file() and file_sha256(source) == old_hash:
-            normalized = source.read_bytes().replace(b"\r\n", b"\n")
-            return hashlib.sha256(normalized).hexdigest() == approved[name]
-    return False
-
-
-def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None):
-    previous = Config.from_dict(manifest["config"]).to_dict()
-    allowed = {"N", "M", "seed", "windows_ms", "device", "gpu_ids", "evaluation_device", "num_workers",
-               "cpu_threads", "data_root", "cache_root", "output_root", "experiment_name",
-               "resume", "check_gradients", "variance_ddof", "monitor_every", "plot_every", "time_branches"}
-    differences = [key for key, value in cfg.to_dict().items() if key not in allowed and previous[key] != value]
-    if differences:
-        raise ValueError(f"Resume would change training/model settings: {differences}; use a new experiment_name")
-    if manifest["purpose"] != purpose or manifest["dataset_fingerprint"] != prepared.metadata["fingerprint"]:
-        raise ValueError("Resume dataset fingerprint or experiment purpose differs")
-    selection_hash = hashlib.sha256(prepared.ids.tobytes()).hexdigest()
-    if manifest["selected_trial_count"] != len(prepared.ids) or manifest.get("selection_sha256", selection_hash) != selection_hash:
-        raise ValueError("Resume trial selection differs")
-    # 旧版可升级训练/评估基础设施；网络和预处理代码必须完全相同。
-    checked_sources = ("model.py", "data.py") if manifest.get("format_version", 1) == 1 else (
-        "model.py", "data.py", "train.py", "evaluate.py")
-    if manifest.get("format_version", 1) >= 4:
-        checked_sources += ("ablation_model.py",)
-    elif cfg.model_variant != "full":
-        raise ValueError("Legacy experiments can only resume as full models")
-    if manifest.get("format_version", 1) >= 5:
-        checked_sources += ("training_timing.py",)
-    for name in checked_sources:
-        previous_hash = manifest["code_sha256"][name]
-        if previous_hash == code_hashes[name]:
-            continue
-        if manifest.get("format_version") == 2 and verified_reporting_upgrade(name, previous_hash, details):
-            print(f"Verified reporting-only v2 upgrade: {name}; training semantics preserved.", flush=True)
-            continue
-        if manifest.get("format_version") == 3 and verified_source_upgrade(
-                name, previous_hash, details, ABLATION_V3_SOURCES):
-            print(f"Verified v3 full-model upgrade: {name}; original model and training preserved.", flush=True)
-            continue
-        if manifest.get("format_version") == 4 and verified_source_upgrade(
-                name, previous_hash, details, TIMING_V4_SOURCES):
-            print(f"Verified v4 timing upgrade: {name}; old branch times remain unknown.", flush=True)
-            continue
-        raise ValueError(f"Resume source code differs: {name}; unverified changes cannot resume this experiment")
-
-
 def run_experiment(cfg=CONFIG, prepared=None, purpose="formal"):
     cfg.validate()
     if purpose not in ("formal", "smoke"):
@@ -605,7 +523,9 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
     source_dir = details / ("source_resume" if existed else "source")
     source_dir.mkdir(exist_ok=True)
     for name in source_names:
-        shutil.copy2(PROJECT_ROOT / name, source_dir / name)
+        destination = source_dir / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PROJECT_ROOT / name, destination)
     decision_file = PROJECT_ROOT / "docs" / "IMPLEMENTATION_NOTES.zh-CN.md"
     if decision_file.exists():
         shutil.copy2(decision_file, source_dir / decision_file.name)
@@ -617,7 +537,7 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
                 "dataset_fingerprint": prepared.metadata["fingerprint"], "code_sha256": code_hashes,
                 "selected_trial_count": len(prepared.ids), "selection": "final epoch only; no target-dependent selection",
                 "statistics": "Population variance by default, not standard deviation; ITR computed per subject/seed first"}
-    manifest.update(format_version=5, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
+    manifest.update(format_version=7, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
                     monitoring="Source training block 1 in eval mode; no validation set or test-based selection")
     if previous is not None:
         manifest["created_utc"] = previous["created_utc"]
