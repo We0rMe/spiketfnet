@@ -22,10 +22,11 @@ from config import CONFIG
 from data import prepare_data
 from evaluate import reevaluate_experiment, run_path, write_json
 import train
+from smoke_tests.assertions import metric_rows
 
 
 def compare_runs(reference, actual):
-    assert (reference / "summary.csv").read_bytes() == (actual / "summary.csv").read_bytes()
+    assert metric_rows(reference / "summary.csv") == metric_rows(actual / "summary.csv")
     folders = sorted(actual.glob("window_*/test_*/seed_*"))
     assert len(folders) == 4
     for folder in folders:

@@ -24,6 +24,7 @@ from config import CONFIG
 from data import prepare_data
 from evaluate import run_path, read_history
 import train
+from smoke_tests.assertions import metric_rows
 
 
 def load_v2(source):
@@ -91,10 +92,10 @@ def main(output_name="reporting_check"):
             pass
         else:
             raise AssertionError("New-version interruption not injected")
-    assert json.loads((upgraded / "details/experiment.json").read_text(encoding="utf-8"))["format_version"] == 3
+    assert json.loads((upgraded / "details/experiment.json").read_text(encoding="utf-8"))["format_version"] == 5
     with patch("train.training_devices", return_value=[torch.device("cpu"), torch.device("cpu")]):
         train.run_experiment(updated_cfg, selected, purpose="smoke")
-    assert (reference / "summary.csv").read_bytes() == (upgraded / "summary.csv").read_bytes()
+    assert metric_rows(reference / "summary.csv") == metric_rows(upgraded / "summary.csv")
     for subject in (1, 2):
         a, b = (run_path(root, 500, subject, 42) for root in (reference, upgraded))
         for name in ("training.png", "confusion.png", "report.md", "training.log"):
@@ -128,7 +129,7 @@ def main(output_name="reporting_check"):
     report = (f"# Reporting upgrade: PASS\n\n{outcome.testsRun} core/device/resume/reporting checks passed.\n"
               "Frozen v2 code trained uninterrupted references and produced a genuine epoch-1 checkpoint.\n"
               "New code resumed it, added monitoring/live artifacts, was interrupted again, then resumed with two CPU workers.\n"
-              "All final weights, training metrics, prediction/evidence arrays and summary matched old uninterrupted training exactly.\n"
+              "All final weights, training metrics, prediction/evidence arrays and metric summary (runtime excluded) matched old uninterrupted training exactly.\n"
               "Live log/plot existed before completion; old monitor values remained missing, not fabricated.\n"
               "Completed old tasks gained reports/confusion/log reconstruction without retraining.\n"
               "Monitor uses source training block 1, never the held-out subject. It is NOT validation.\n\n"

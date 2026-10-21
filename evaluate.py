@@ -13,7 +13,8 @@ from torch.utils.data import DataLoader
 
 from config import CONFIG, Config
 from data import WindowDataset, file_sha256, prepare_data
-from model import SpikeTFNet
+from ablation_model import build_model
+from training_timing import timing_markdown, timing_rows, timing_totals
 
 
 def write_text(path, text):
@@ -87,6 +88,7 @@ def write_run_report(folder, cfg, history, provenance):
     monitored = [row for row in history if row.get("monitor_loss") is not None]
     last = history[-1] if history else {}
     lines = [f"# SpikeTFNet · S{provenance['test_subject']:02d} · seed {provenance['seed']}",
+             "", f"模型组别：{cfg.model_variant}。",
              "", f"状态：{provenance['status']}；历史记录进度：{last.get('epoch', 0)}/{cfg.epochs} epoch。",
              f"窗口：{provenance['window_ms']} ms；设备：{provenance.get('device', '未记录')}。",
              f"训练被试：{provenance['training_subjects']}；训练 trial：{provenance['training_trials']}；"
@@ -106,6 +108,7 @@ def write_run_report(folder, cfg, history, provenance):
                   f"| ACC % | {metrics['acc_percent']:.4f} |",
                   f"| ITR bits/min | {metrics['itr_bits_per_minute']:.4f} |",
                   "", "![测试混淆矩阵](confusion.png)"]
+    lines += timing_markdown(timing_totals([(cfg.model_variant, history)], cfg.epochs))
     lines += ["", "训练集监测使用源训练被试的第一个 block，**不是独立验证集**，不能用于判断跨被试泛化。",
               "不按监测值早停或选模型。留出被试只在固定最后一轮之后测试。",
               f"监测间隔：{cfg.monitor_every}（0 为关闭）；历史中有监测值的 epoch：{len(monitored)}。",
@@ -117,6 +120,7 @@ def write_run_report(folder, cfg, history, provenance):
 
 def refresh_progress(root, cfg):
     rows, completed = [], 0
+    timing_runs = []
     for window in cfg.windows_ms:
         for subject in cfg.test_subjects:
             for seed in cfg.seeds:
@@ -125,6 +129,7 @@ def refresh_progress(root, cfg):
                 provenance = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
                 status = provenance.get("status", "pending")
                 history = read_history(folder / "details/history.csv")
+                timing_runs.append((cfg.model_variant, history))
                 epoch = history[-1]["epoch"] if history else 0
                 acc, itr = "—", "—"
                 if status == "complete":
@@ -143,6 +148,7 @@ def refresh_progress(root, cfg):
             "训练曲线的监测线来自训练子集，不是独立验证集。最终测试结果不参与早停或选模。",
             "M=1 时没有独立种子重复，跨重复方差 0 不代表稳定性。",
             "", "[主进程日志](details/experiment.log) · [实验配置及恢复记录](details/experiment.json)"]
+    text += timing_markdown(timing_totals(timing_runs, cfg.epochs))
     write_text(Path(root) / "report.md", "\n".join(text) + "\n")
 
 
@@ -208,7 +214,14 @@ class SpikeRecorder:
 
 def evaluate_model(model, loader, cfg, window_ms, device):
     model.eval()
-    collected = {name: [] for name in ("logits", "spectral_logits", "temporal_logits", "gate", "embedding", "labels")}
+    names = ["logits", "embedding", "labels"]
+    if cfg.model_variant != "temporal_only":
+        names.append("spectral_logits")
+    if cfg.model_variant != "spectral_only":
+        names.append("temporal_logits")
+    if cfg.model_variant == "full":
+        names.append("gate")
+    collected = {name: [] for name in names}
     recorder = SpikeRecorder(model)
     probes_time, probes_spectrum = [], []
     probe_count = 0
@@ -236,7 +249,8 @@ def evaluate_model(model, loader, cfg, window_ms, device):
                "itr_bits_per_minute": itr_bits_per_minute(accuracy, cfg.num_classes,
                                                            window_ms / 1000 + cfg.gaze_shift_seconds)}
     arrays.update(spike_layer_names=np.asarray(recorder.names),
-                  spike_counts=torch.stack(recorder.counts).cpu().numpy(),
+                  spike_counts=(torch.stack(recorder.counts).cpu().numpy() if recorder.counts
+                                else np.empty(0, dtype=np.int64)),
                   spike_elements=np.asarray(recorder.elements, dtype=np.int64),
                   probe_time=np.concatenate(probes_time), probe_spectrum=np.concatenate(probes_spectrum))
     return metrics, arrays
@@ -275,7 +289,9 @@ def aggregate_matrix(matrix, ddof):
 
 def summarize_experiment(root, cfg):
     rows = []
+    all_timing_runs = []
     for window in cfg.windows_ms:
+        window_timing_runs = []
         values = {metric: np.zeros((cfg.N, cfg.M)) for metric in ("acc_percent", "itr_bits_per_minute")}
         for i, subject in enumerate(cfg.test_subjects):
             for j, seed in enumerate(cfg.seeds):
@@ -284,6 +300,7 @@ def summarize_experiment(root, cfg):
                 if provenance["status"] != "complete" or provenance["test_subject"] != subject or provenance["seed"] != seed:
                     raise ValueError(f"Incomplete or mismatched run: {folder}")
                 metrics = json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
+                window_timing_runs.append((cfg.model_variant, read_history(folder / "details/history.csv")))
                 for metric in values:
                     values[metric][i, j] = metrics[metric]
         for metric, matrix in values.items():
@@ -299,9 +316,12 @@ def summarize_experiment(root, cfg):
                              **item, "ddof": cfg.variance_ddof, "mean_plus_variance": display})
             main = rows[-len(groups)]["mean_plus_variance"]
             print(f"{window} ms | {metric} | across repeats: {main}", flush=True)
+        rows.extend(timing_rows(timing_totals(window_timing_runs, cfg.epochs), window, member="all"))
+        all_timing_runs.extend(window_timing_runs)
+    rows.extend(timing_rows(timing_totals(all_timing_runs, cfg.epochs), "all", member="all"))
     destination = Path(root) / "summary.csv"
     with destination.with_suffix(".tmp").open("w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(handle, fieldnames=list(dict.fromkeys(key for row in rows for key in row)))
         writer.writeheader()
         writer.writerows(rows)
     destination.with_suffix(".tmp").replace(destination)
@@ -318,6 +338,9 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
         cfg = replace(cfg, evaluation_device=device_name)
     if file_sha256(Path(__file__).with_name("model.py")) != manifest["code_sha256"]["model.py"]:
         raise ValueError("Model source changed; use the archived source to replay this experiment")
+    if manifest.get("format_version", 1) >= 4 and file_sha256(Path(__file__).with_name(
+            "ablation_model.py")) != manifest["code_sha256"]["ablation_model.py"]:
+        raise ValueError("Ablation model source changed; use the archived source")
     prepared = prepare_data(cfg) if prepared is None else prepared.validate(cfg)
     if prepared.metadata["fingerprint"] != manifest["dataset_fingerprint"]:
         raise ValueError("Dataset/preprocessing differs from the training experiment")
@@ -337,7 +360,7 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
                 rows = np.array([lookup[tuple(identity)] for identity in test_ids])
                 dataset = WindowDataset(prepared, cfg, window, rows)
                 loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
-                model = SpikeTFNet(cfg).to(device)
+                model = build_model(cfg).to(device)
                 model.load_state_dict(torch.load(folder / "details" / "model.pt", map_location=device, weights_only=True))
                 metrics, arrays = evaluate_model(model, loader, cfg, window, device)
                 save_evaluation(folder, metrics, arrays, training_ids, test_ids)

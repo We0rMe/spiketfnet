@@ -24,7 +24,11 @@ from config import CONFIG, PROJECT_ROOT, Config
 from data import WindowDataset, file_sha256, loso_indices, prepare_data
 from evaluate import (evaluate_model, plot_confusion, plot_training, read_history, refresh_progress,
                       resolve_device, run_path, save_evaluation, summarize_experiment, write_json, write_run_report)
-from model import SpikeTFNet, joint_loss
+from ablation_model import build_model, joint_loss
+from training_timing import BranchTimer
+
+SOURCE_NAMES = ("config.py", "data.py", "model.py", "ablation_model.py", "ablation.py",
+                "train.py", "evaluate.py", "training_timing.py", "requirements.txt")
 
 
 def seed_everything(seed, cfg):
@@ -58,29 +62,35 @@ def train_epoch(model, loader, optimizer, cfg, device):
     total_loss = torch.zeros((), dtype=torch.float64, device=device)
     correct = torch.zeros((), dtype=torch.long, device=device)
     count = 0
-    for time, spectrum, labels in loader:
-        time, spectrum, labels = (value.to(device, non_blocking=True) for value in (time, spectrum, labels))
-        optimizer.zero_grad(set_to_none=True)
-        outputs = model(time, spectrum)
-        loss = joint_loss(outputs, labels, cfg)
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Nonfinite training loss")
-        loss.backward()
-        if cfg.check_gradients:
-            finite_gradients = torch.stack([torch.isfinite(p.grad).all() for p in model.parameters()
-                                            if p.grad is not None]).all()
-            if not finite_gradients:
-                raise FloatingPointError("Nonfinite training gradients")
-        optimizer.step()
-        total_loss += loss.detach().double() * len(labels)
-        correct += (outputs["logits"].argmax(1) == labels).sum()
-        count += len(labels)
+    with BranchTimer(model, device, cfg.time_branches) as timer:
+        for time, spectrum, labels in loader:
+            time, spectrum, labels = (value.to(device, non_blocking=True) for value in (time, spectrum, labels))
+            optimizer.zero_grad(set_to_none=True)
+            outputs = model(time, spectrum)
+            loss = joint_loss(outputs, labels, cfg)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite training loss")
+            timer.prepare_backward(loss)
+            try:
+                loss.backward()
+            finally:
+                timer.end_backward()
+            if cfg.check_gradients:
+                finite_gradients = torch.stack([torch.isfinite(p.grad).all() for p in model.parameters()
+                                                if p.grad is not None]).all()
+                if not finite_gradients:
+                    raise FloatingPointError("Nonfinite training gradients")
+            optimizer.step()
+            total_loss += loss.detach().double() * len(labels)
+            correct += (outputs["logits"].argmax(1) == labels).sum()
+            count += len(labels)
+        branch_times = timer.totals()
     if count == 0:
         raise ValueError("Empty training loader")
     finite_parameters = torch.stack([torch.isfinite(p).all() for p in model.parameters()]).all()
     if not finite_parameters:
         raise FloatingPointError("Nonfinite model parameters at epoch end")
-    return {"loss": total_loss.item() / count, "train_acc_percent": 100 * correct.item() / count}
+    return {"loss": total_loss.item() / count, "train_acc_percent": 100 * correct.item() / count, **branch_times}
 
 
 class Tee:
@@ -230,6 +240,7 @@ def preserved_rng(generator, device):
 def write_history(path, history):
     with path.with_suffix(".tmp").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=("epoch", "loss", "train_acc_percent", "train_seconds",
+                                                    "spectral_train_seconds", "temporal_train_seconds",
                                                     "monitor_loss", "monitor_acc_percent", "monitor_seconds"))
         writer.writeheader()
         writer.writerows(history)
@@ -239,6 +250,7 @@ def write_history(path, history):
 def save_resume(path, model, optimizer, generator, device, history, job, prepared):
     # 膜电位在 forward 后已重置；保存 epoch 边界可恢复的随机数和数据顺序。
     atomic_torch_save({"format_version": 1, "job": job, "epoch": len(history), "history": history,
+                       "model_variant": getattr(model, "model_variant", "full"),
                        "dataset_fingerprint": prepared.metadata["fingerprint"],
                        "model": model.state_dict(), "optimizer": optimizer.state_dict(),
                        "rng": rng_state(generator, device)}, path)
@@ -250,6 +262,8 @@ def completed_job(folder, job, prepared, cfg):
     if not provenance_file.exists():
         return False
     provenance = json.loads(provenance_file.read_text(encoding="utf-8"))
+    if provenance.get("model_variant", "full") != cfg.model_variant:
+        raise ValueError(f"Run model variant mismatch: {folder}")
     if (provenance["window_ms"], provenance["test_subject"], provenance["seed"]) != job:
         raise ValueError(f"Run identity mismatch: {folder}")
     if provenance["status"] != "complete":
@@ -266,6 +280,8 @@ def completed_job(folder, job, prepared, cfg):
     history = read_history(private / "history.csv")
     if not (folder / "report.md").exists():
         update_run_artifacts(folder, cfg, history, provenance)
+    else:
+        write_run_report(folder, cfg, history, provenance)
     if not (folder / "confusion.png").exists():
         plot_confusion(folder, cfg)
     recover_log(folder, history)
@@ -290,6 +306,7 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
     private.mkdir(parents=True, exist_ok=True)
     resume_file = private / "resume.pt"
     provenance = {"status": "training", "purpose": purpose, "test_subject": subject,
+                  "model_variant": cfg.model_variant,
                   "training_subjects": sorted(set(prepared.ids[training_rows, 0].tolist())),
                   "seed": seed, "window_ms": window, "epochs": cfg.epochs,
                   "device": str(device), "worker_pid": os.getpid(),
@@ -302,11 +319,13 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
               "pin_memory": device.type == "cuda", "worker_init_fn": seed_worker}
     train_loader = DataLoader(Subset(dataset, training_rows.tolist()), shuffle=True, generator=generator, **common)
     test_loader = DataLoader(Subset(dataset, test_rows.tolist()), shuffle=False, **common)
-    model = SpikeTFNet(cfg).to(device)
+    model = build_model(cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     history = []
     if resume_file.exists():
         state = torch.load(resume_file, map_location="cpu", weights_only=True)
+        if state.get("model_variant", "full") != cfg.model_variant:
+            raise ValueError(f"Resume model variant mismatch: {resume_file}")
         if state["format_version"] != 1 or tuple(state["job"]) != job or state[
                 "dataset_fingerprint"] != prepared.metadata["fingerprint"]:
             raise ValueError(f"Resume checkpoint identity mismatch: {resume_file}")
@@ -342,6 +361,8 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
     write_json(private / "provenance.json", provenance)
     print(f"TRAIN {len(training_rows)} trials; MONITOR {len(monitor_rows)} source block-1 trials (NOT validation); "
           f"TEST {len(test_rows)} trials after epoch {cfg.epochs} only.", flush=True)
+    print(f"MODEL {cfg.model_variant}; branch timing={'ON' if cfg.time_branches else 'OFF'} "
+          "(branch forward+backward only; fusion/loss/Adam/I/O remain in overall train time).", flush=True)
     with preserved_rng(generator, device):
         update_run_artifacts(folder, cfg, history, provenance)
     try:
@@ -368,9 +389,12 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
             monitor_text = (f"monitor_loss={row['monitor_loss']:.4f} "
                             f"monitor_ACC={row['monitor_acc_percent']:.2f}% (NOT validation) "
                             if "monitor_loss" in row else "")
+            branch_text = " ".join(f"{name}={row[name + '_train_seconds']:.3f}s"
+                                   if row[name + "_train_seconds"] is not None else f"{name}=NA"
+                                   for name in ("spectral", "temporal"))
             print(f"[{device}] {window}ms S{subject:02d} seed={seed} epoch={epoch}/{cfg.epochs} "
                   f"loss={row['loss']:.4f} train_ACC={row['train_acc_percent']:.2f}% "
-                  f"{monitor_text}train={row['train_seconds']:.2f}s monitor={row.get('monitor_seconds', 0):.2f}s "
+                  f"{monitor_text}{branch_text} train={row['train_seconds']:.2f}s monitor={row.get('monitor_seconds', 0):.2f}s "
                   f"save={save_seconds:.2f}s plot={plot_seconds:.2f}s "
                   f"total={time.perf_counter() - started:.2f}s", flush=True)
         atomic_torch_save(model.state_dict(), private / "model.pt")
@@ -463,15 +487,29 @@ REPORTING_V2_SOURCES = {
     "evaluate.py": "1c800e8cc51dfae59ce18ef64af81150011805afceaae5d1e5ed318409cb36dd",
 }
 
+ABLATION_V3_SOURCES = {
+    "train.py": "4fff6ebc49e0b31e23dbccbe598e4a2bac1fb5390b75a361f042431646144edc",
+    "evaluate.py": "dca51e7f17af5f882844a8f9156aca5165d666f311e12b7feae9b347ff9423c3",
+}
+
+TIMING_V4_SOURCES = {
+    "train.py": "8f9a556c95282f7d1b72fa7097cce9cd8f4d4c67be245e96776df9aca5e0bfc5",
+    "evaluate.py": "aeb04d511ac52fb92c5b76ed4869c0ae836e7ca40379bf66b85ef6ccec434f15",
+}
+
 
 def verified_reporting_upgrade(name, old_hash, details):
-    if details is None or name not in REPORTING_V2_SOURCES:
+    return verified_source_upgrade(name, old_hash, details, REPORTING_V2_SOURCES)
+
+
+def verified_source_upgrade(name, old_hash, details, approved):
+    if details is None or name not in approved:
         return False
     for directory in ("source_resume", "source"):
         source = Path(details) / directory / name
         if source.is_file() and file_sha256(source) == old_hash:
             normalized = source.read_bytes().replace(b"\r\n", b"\n")
-            return hashlib.sha256(normalized).hexdigest() == REPORTING_V2_SOURCES[name]
+            return hashlib.sha256(normalized).hexdigest() == approved[name]
     return False
 
 
@@ -479,7 +517,7 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
     previous = Config.from_dict(manifest["config"]).to_dict()
     allowed = {"N", "M", "seed", "windows_ms", "device", "gpu_ids", "evaluation_device", "num_workers",
                "cpu_threads", "data_root", "cache_root", "output_root", "experiment_name",
-               "resume", "check_gradients", "variance_ddof", "monitor_every", "plot_every"}
+               "resume", "check_gradients", "variance_ddof", "monitor_every", "plot_every", "time_branches"}
     differences = [key for key, value in cfg.to_dict().items() if key not in allowed and previous[key] != value]
     if differences:
         raise ValueError(f"Resume would change training/model settings: {differences}; use a new experiment_name")
@@ -491,12 +529,26 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
     # 旧版可升级训练/评估基础设施；网络和预处理代码必须完全相同。
     checked_sources = ("model.py", "data.py") if manifest.get("format_version", 1) == 1 else (
         "model.py", "data.py", "train.py", "evaluate.py")
+    if manifest.get("format_version", 1) >= 4:
+        checked_sources += ("ablation_model.py",)
+    elif cfg.model_variant != "full":
+        raise ValueError("Legacy experiments can only resume as full models")
+    if manifest.get("format_version", 1) >= 5:
+        checked_sources += ("training_timing.py",)
     for name in checked_sources:
         previous_hash = manifest["code_sha256"][name]
         if previous_hash == code_hashes[name]:
             continue
         if manifest.get("format_version") == 2 and verified_reporting_upgrade(name, previous_hash, details):
             print(f"Verified reporting-only v2 upgrade: {name}; training semantics preserved.", flush=True)
+            continue
+        if manifest.get("format_version") == 3 and verified_source_upgrade(
+                name, previous_hash, details, ABLATION_V3_SOURCES):
+            print(f"Verified v3 full-model upgrade: {name}; original model and training preserved.", flush=True)
+            continue
+        if manifest.get("format_version") == 4 and verified_source_upgrade(
+                name, previous_hash, details, TIMING_V4_SOURCES):
+            print(f"Verified v4 timing upgrade: {name}; old branch times remain unknown.", flush=True)
             continue
         raise ValueError(f"Resume source code differs: {name}; unverified changes cannot resume this experiment")
 
@@ -534,7 +586,7 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
         raise ValueError("Formal experiment must use all trials")
     details = root / "details"
     os.environ.setdefault("MPLCONFIGDIR", str(details / "plot_cache"))
-    source_names = ("config.py", "data.py", "model.py", "train.py", "evaluate.py", "requirements.txt")
+    source_names = SOURCE_NAMES
     code_hashes = {name: file_sha256(PROJECT_ROOT / name) for name in source_names}
     previous = json.loads((details / "experiment.json").read_text(encoding="utf-8")) if existed else None
     if previous is not None:
@@ -565,7 +617,7 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
                 "dataset_fingerprint": prepared.metadata["fingerprint"], "code_sha256": code_hashes,
                 "selected_trial_count": len(prepared.ids), "selection": "final epoch only; no target-dependent selection",
                 "statistics": "Population variance by default, not standard deviation; ITR computed per subject/seed first"}
-    manifest.update(format_version=3, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
+    manifest.update(format_version=5, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
                     monitoring="Source training block 1 in eval mode; no validation set or test-based selection")
     if previous is not None:
         manifest["created_utc"] = previous["created_utc"]

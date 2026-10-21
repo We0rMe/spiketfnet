@@ -22,6 +22,7 @@ from config import CONFIG
 from data import prepare_data
 from evaluate import reevaluate_experiment
 from train import run_experiment
+from smoke_tests.assertions import metric_rows
 
 
 def main():
@@ -47,7 +48,7 @@ def main():
     # 只替换设备发现；spawn、任务分配、模型训练与文件写入均走生产路径。
     with patch("train.training_devices", return_value=[torch.device("cpu"), torch.device("cpu")]):
         parallel = run_experiment(replace(cfg, experiment_name="parallel"), selected, purpose="smoke")
-    assert (serial / "summary.csv").read_bytes() == (parallel / "summary.csv").read_bytes()
+    assert metric_rows(serial / "summary.csv") == metric_rows(parallel / "summary.csv")
     pids = set()
     runs = sorted(parallel.glob("window_*/test_*/seed_*"))
     assert len(runs) == 4
@@ -74,7 +75,7 @@ def main():
             torch.testing.assert_close(weights[name], expected_weights[name], rtol=0, atol=0)
     assert len(pids) == 2 and os.getpid() not in pids
     reevaluate_experiment(parallel, prepared=selected, device_name="cpu")
-    assert (serial / "summary.csv").read_bytes() == (parallel / "summary.csv").read_bytes()
+    assert metric_rows(serial / "summary.csv") == metric_rows(parallel / "summary.csv")
     for folder in runs:
         with np.load(folder / "details" / "evaluation.npz") as actual, np.load(serial / folder.relative_to(parallel) / "details" / "evaluation.npz") as expected:
             np.testing.assert_array_equal(actual["logits"], expected["logits"])

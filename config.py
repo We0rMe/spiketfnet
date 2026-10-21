@@ -1,6 +1,6 @@
 """统一配置；P=论文，R=相关作者实现，A=已获同意的工程默认值。"""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 import math
 from pathlib import Path
 
@@ -74,6 +74,7 @@ class Config:
     cpu_threads: int = 4  # CPU 运算线程数
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
     check_gradients: bool = False  # 调试开关：逐 batch 扫描全部梯度；正式训练关闭以减少开销
+    time_branches: bool = True  # 记录两个分支的前向+反向耗时；有插桩开销，可关闭
     resume: bool = True  # 同名实验自动跳过完成任务、从上个完整 epoch 恢复
     monitor_every: int = 5  # 每隔若干 epoch 监测源训练被试的 block 1；首/末轮也测，0 禁用
     plot_every: int = 1  # 每隔若干 epoch 覆盖更新曲线和单次报告；不产生逐轮图片
@@ -81,6 +82,9 @@ class Config:
     output_root: Path = PROJECT_ROOT / "results"  # 正式实验输出
     experiment_name: str = "spiketfnet"  # 同名恢复；换名称可开始全新实验
     probe_trials: int = 4  # 保存供未来效率测量使用的代表性输入数量
+
+    # 内部记录字段，不作为运行选择项修改；ablation.py 自动填入并保存到断点。
+    model_variant: str = field(default="full", repr=False)
 
     @property
     def seeds(self):
@@ -107,6 +111,8 @@ class Config:
         return self.sampling_rate * window_ms // 1000
 
     def validate(self):
+        if self.model_variant not in ("full", "spectral_only", "temporal_only", "equal_fusion"):
+            raise ValueError(f"Unknown model variant: {self.model_variant}")
         integer_fields = ("N", "M", "seed", "epochs", "batch_size", "sampling_rate", "simulation_steps",
                           "temporal_width", "attention_heads", "spectral_depth", "embedding_dim", "fusion_dim", "gate_hidden_dim")
         if any(type(getattr(self, name)) is not int for name in integer_fields):
@@ -133,8 +139,8 @@ class Config:
             raise ValueError("Invalid optimizer or auxiliary loss settings")
         if self.cpu_threads < 1 or self.num_workers < 0 or self.gaze_shift_seconds < 0:
             raise ValueError("Invalid runtime or ITR settings")
-        if any(type(value) is not bool for value in (self.resume, self.check_gradients)):
-            raise ValueError("resume and check_gradients must be bool")
+        if any(type(value) is not bool for value in (self.resume, self.check_gradients, self.time_branches)):
+            raise ValueError("resume, check_gradients and time_branches must be bool")
         if type(self.monitor_every) is not int or self.monitor_every < 0 or type(self.plot_every) is not int or self.plot_every < 1:
             raise ValueError("monitor_every must be nonnegative; plot_every must be positive integers")
         for name in (self.device, self.evaluation_device):
@@ -179,3 +185,17 @@ class Config:
 
 
 CONFIG = Config()
+
+# 消融运行设置：python ablation.py 只运行下面列出的组，这是唯一的组别选择入口。
+# 单组示例：ABLATION_GROUPS = ("spectral_only",)
+ABLATION_GROUPS = ("full", "spectral_only", "temporal_only", "equal_fusion")
+ABLATION_WINDOWS_MS = (500,)  # 可选窗口，例如 (500, 1000)；对所有已选组一致
+ABLATION_ROOT = CONFIG.output_root / "ablation"  # 批次根目录；组名/窗口/被试/种子子目录自动生成
+
+# N/M/seed、设备和其余参数继承 CONFIG。
+ABLATION_CONFIG = replace(
+    CONFIG,
+    windows_ms=ABLATION_WINDOWS_MS,
+    output_root=ABLATION_ROOT,
+    cache_root=CONFIG.cache_root / "ablation",  # 与普通训练缓存隔离
+)
