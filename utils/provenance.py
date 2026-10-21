@@ -24,6 +24,11 @@ LAYOUT_V5_SOURCES = {
     "training_timing.py": "2469b7d55e27b1fc2c3bd86d041fabef5e519ccedf2ae76d1d766c504a6a9aa1",
 }
 
+LOG_FORMAT_V7_SOURCES = {
+    "utils/timing.py": "87b5a7e948e2bf62669f9d5b25eba4573017030a674ffb82bc1ef827575acde1",
+    "utils/provenance.py": "fda11333bed2fc636bafb399a7b7a4af8a0bfdf77aece478ee995cc5005abcd7",
+}
+
 MODULE_TIMING_V6_SOURCES = {
     "train.py": "35ed6c3c74f353c48e84148289d042680278671bdd29adf3f8379e3e1f619ac6",
     "evaluate.py": "515ceb814c0f8f73c623de0b02be728a27a4f06ac71846c1ca563cafb75ec300",
@@ -109,5 +114,8 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
             continue
         if version == 6 and verified_source_upgrade(name, previous_hash, details, MODULE_TIMING_V6_SOURCES):
             print(f"Verified v6 module-timing upgrade: {name}; old module times remain unknown.", flush=True)
+            continue
+        if version == 7 and verified_source_upgrade(name, previous_hash, details, LOG_FORMAT_V7_SOURCES):
+            print(f"Verified v7 log-format upgrade: {name}; training and timing calculations preserved.", flush=True)
             continue
         raise ValueError(f"Resume source code differs: {name}; unverified changes cannot resume this experiment")

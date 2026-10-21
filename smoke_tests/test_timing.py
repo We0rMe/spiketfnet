@@ -180,8 +180,8 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(totals["temporal1_train_seconds"]["recorded_trials"], 6)
         self.assertEqual(set(totals), set(TIME_KEYS))
         line = timing_log(history[1])
-        self.assertEqual(line.count("ms/trial"), 2)
-        self.assertIn("Temporal Times1=6.000s (1000.000ms/trial)", line)
+        self.assertNotIn("/trial", line)
+        self.assertIn("Temporal Times1=6.000s", line)
         self.assertNotIn("monitor=", line)
 
     def test_single_group_selection_names_folder_without_mutating_main_config(self):

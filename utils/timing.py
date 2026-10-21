@@ -157,10 +157,9 @@ def normalize_history(history, training_trials=None):
 def timing_log(row):
     fields = []
     for key, label in zip(TIME_KEYS, TIME_LABELS):
-        value, count = row.get(key), row.get("train_trials")
+        value = row.get(key)
         seconds = f"{value:.3f}s" if value is not None else "NA"
-        trial = f"{1000 * value / count:.3f}ms/trial" if value is not None and count else "NA/trial"
-        fields.append(f"{label}={seconds} ({trial})")
+        fields.append(f"{label}={seconds}")
     return " | ".join(fields)
 
 

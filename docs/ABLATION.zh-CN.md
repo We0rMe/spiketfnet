@@ -117,10 +117,10 @@ ITR 沿用原公式，500 ms 时选择周期为 0.5 + 0.5 = 1.0 s。
 完整模型对每个 batch 依次计算频域、时域分支，再融合；主 CE 与辅助 CE 相加后只调用一次 backward 和一次 Adam.step，两个分支及融合模块联合优化。
 没有分别预训练后再融合，也没有把同一个模型的两个分支分放到两张卡。两张卡运行的是不同 LOSO 任务。
 
-`CONFIG.time_branches=True` 默认开启模块计时，所有组一致。每个 epoch 仅显示五项时间，并在括号中显示该 epoch 平均 ms/trial：
+`CONFIG.time_branches=True` 默认开启模块计时，所有组一致。每个 epoch 仅显示五项累计时间，平均每 trial 只保留在 CSV 和报告中：
 
 ```text
-Spectral Times=...s (...ms/trial) | Temporal Times1=...s (...ms/trial) | Temporal Times2=...s (...ms/trial) | Temporal Times3=...s (...ms/trial) | Total Time=...s (...ms/trial)
+Spectral Times=...s | Temporal Times1=...s | Temporal Times2=...s | Temporal Times3=...s | Total Time=...s
 ```
 
 Times1 包含 current 的 Conv/BN、LIF 编码及 Dropout；Times2 包含全部堆叠残差块；Times3 包含脉冲注意力、token 平均读出、嵌入/辅助分类头、跨仿真步平均。三个模块累计所有仿真步的前向与反向，未改变模型结构或优化步骤。Spectral Times 保留整个频域分支的前向与反向。
@@ -129,7 +129,7 @@ Total Time 是训练阶段墙钟时间，包含融合、loss、Adam、数据读�
 
 平均每 trial = 耗时 / 对应实际处理的 trial 次数，包含不满 batch 的样本；每个 epoch 重复处理的 trial 重复计数。这是 batch 均摊值，不代表单 trial 独立延迟。汇总按实际 trial 次数加权。
 
-每个 epoch 的时间与均摊值仍保存在 training.log 和 details/history.csv；CSV 单位为秒、秒/trial。每次完整训练的 report.md，以及组级 report.md/summary.csv、批次 report.md/comparison.csv 均保留这五项累计、平均每 trial 和计时覆盖率。`variant=all_selected, window_ms=all, scope=training_time_total` 是全部已选组的合计。完整总时长放在 total_seconds，部分记录放在 recorded_seconds；seconds_per_trial 对应同一已记录部分，recorded_trials 是其分母。没有新增单独的计时结果文件。
+每个 epoch 的时间保存在 training.log；时间与均摊值保存在 details/history.csv，CSV 单位为秒、秒/trial。每次完整训练的 report.md，以及组级 report.md/summary.csv、批次 report.md/comparison.csv 均保留这五项累计、平均每 trial 和计时覆盖率。`variant=all_selected, window_ms=all, scope=training_time_total` 是全部已选组的合计。完整总时长放在 total_seconds，部分记录放在 recorded_seconds；seconds_per_trial 对应同一已记录部分，recorded_trials 是其分母。没有新增单独的计时结果文件。
 
 时域总计、monitor/save/plot 等旧时间字段从新输出移除；loss、ACC 和监测指标保留。旧日志原文不改写。缺少三个模块计时的旧 epoch 不能拆分补造，显示缺失与覆盖率；旧整体/频域时间可继续累计。已完成任务只更新报告与历史列，不为补测耗时重训。消融删除的模块为 0；关闭计时的现存模块为 NA。
 

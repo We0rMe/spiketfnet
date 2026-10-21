@@ -118,7 +118,7 @@ def main(output_name="module_timing_check", version=6):
         assert "temporal_train_seconds" not in header and "monitor_seconds" not in header
         log = (folder / "training.log").read_text(encoding="utf-8")
         new_line = next(line for line in log.splitlines() if "Temporal Times1=" in line and "epoch=2/2" in line)
-        assert new_line.count("ms/trial") == 5
+        assert "/trial" not in new_line
         assert not any(token in new_line for token in ("monitor=", "save=", "plot=", "temporal="))
         compare_runs(reference, root, cfg)
         reevaluate_experiment(root, selected, device_name="cpu")

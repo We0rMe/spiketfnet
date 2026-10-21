@@ -102,7 +102,7 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 `Total Time` 不含监测、测试、保存或绘图，不要求等于四个模块时间之和。`time_branches=True` 开启四个模块的计时；关闭时仍计 Total Time，存在模块显示 NA，消融删除的模块显示 0。CUDA 使用当前流上的事件，CPU 使用 perf_counter；不增加逐 batch 的强制同步。区间内包含调度开销，不是纯 kernel 时间，计时本身也有开销。
 
-每项日志同时显示本 epoch 的秒数与平均 ms/trial。平均每 trial = 该项耗时 / 本 epoch 实际处理 trial 次数，包含末尾不足 batch_size 的 batch；这是 batch 均摊值，不是单 trial 独立运行延迟。完整训练和所有折/种子的平均值按对应 trial 次数加权，不能简单平均各 epoch 或任务的均值。
+每项 epoch 日志只显示该部分的累计秒数，不显示平均每 trial。CSV 和报告继续保留均摊值：平均每 trial = 该项 epoch 耗时 / 本 epoch 所有 batch 实际处理的 trial 总数，包含末尾不足 batch_size 的 batch；分母不是一个 batch 的 batch_size。这是批量训练的单位样本均摊成本，不是单 trial 独立运行延迟。完整训练和所有折/种子的平均值按对应 trial 次数加权，不能简单平均各 epoch 或任务的均值。
 
 输出沿用现有文件：`training.log` 实时追加；`details/history.csv` 保存五项 epoch 秒数、`train_trials` 和五项 `_per_trial`（秒/trial）。每个窗口/被试/种子的 `report.md`、实验 `report.md`/`summary.csv`，以及消融批次 `report.md`/`comparison.csv` 保存五项累计与平均每 trial。汇总中 `total_seconds` 仅在计时完整时填写；`recorded_seconds`、`recorded_epochs/expected_epochs` 标明已记录部分，`seconds_per_trial` 使用同一部分的 trial 次数。
 
