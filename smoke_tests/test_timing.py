@@ -87,7 +87,7 @@ class TimingTests(unittest.TestCase):
 
     def test_instrumentation_preserves_gradients_weights_rng_for_all_groups(self):
         for variant in ("full", "spectral_only", "temporal_only", "equal_fusion"):
-            cfg = replace(CONFIG, model_variant=variant, device="cpu", windows_ms=(500,), batch_size=2)
+            cfg = replace(CONFIG, model_variant=variant, device="cpu", windows_ms=(500,), batch_size=2, t2_profile_batch=2)
             seed_everything(42, cfg)
             data = TensorDataset(torch.randn(3, 9, 125), torch.randn(3, 9, 560), torch.tensor([0, 1, 2]))
             states, gradients, rngs, rows = [], [], [], []
@@ -199,7 +199,7 @@ class TimingTests(unittest.TestCase):
         key = TIME_KEYS[0]
         history = normalize_history([{key: 8, "temporal_train_seconds": 6, "monitor_seconds": 2, "train_trials": 4},
                                      {key: 18, "train_trials": 6}])
-        self.assertNotIn("temporal_train_seconds", history[0])
+        self.assertEqual(history[0]["temporal_train_seconds"], 6)
         self.assertNotIn("monitor_seconds", history[0])
         self.assertEqual(history[0][key + "_per_trial"], 2)
         totals = timing_totals([("full", history)], 2)

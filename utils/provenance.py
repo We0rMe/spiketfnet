@@ -9,7 +9,7 @@ from data import file_sha256
 SOURCE_NAMES = (
     "config.py", "data.py", "model.py", "train.py", "evaluate.py", "requirements.txt",
     "experiments/__init__.py", "experiments/ablation.py", "experiments/variants.py",
-    "utils/__init__.py", "utils/timing.py", "utils/provenance.py", "utils/operator_profile.py",
+    "utils/__init__.py", "utils/timing.py", "utils/provenance.py", "utils/operator_profile.py", "utils/branch_timing.py",
 )
 
 LEGACY_SOURCE_PATHS = {
@@ -40,6 +40,21 @@ DETAILED_TIMING_V8_SOURCES = {
     "evaluate.py": "48ed758d879bfd34999f3da8326599c80248117809d6b8de17a1f6a8e55c450f",
     "utils/timing.py": "67d42dba38ae28db22e11a1b0bdaed74e6c30fd57f24a7654a3d04622f4a655d",
     "utils/provenance.py": "48242eab8116e5c0774182e4cf060c142f18a91a71977883416087ef99ccdf09",
+}
+
+STD_REPORTING_V11_SOURCES = {
+    "train.py": "1fd0256c6796046f5cd49c088b5d7713f47677769bbe03307c564f455a2f0739",
+    "evaluate.py": "286f49c398018518ed29f595eeff55ad842c2bac9e3a217a98dcbbe0670ff31a",
+    "utils/provenance.py": "4551db359ac3e4f9c72c184051490b8c499b7da5db2cef7997d1b0519cd09ebf",
+    "experiments/ablation.py": "29c9f6d5b327af876332f8ed4dd298ef91acdd1da4b0b6908ad64a87d0d9a0fa",
+}
+
+BRANCH_SUMMARY_V10_SOURCES = {
+    "train.py": "1dcb71dfd3552e12c8dbc2f8e4c99cefd51bf07907740f694025e7b8bbe5da78",
+    "evaluate.py": "2a6fb712702c46281dfe915fcb842ed5fa54cf1f53f1d3848c0e7e1b9ac7ecc2",
+    "utils/timing.py": "f21edcfc0ae87068bf15fdac59d35ddee196bf9d2483733ee1f3ec3293c56080",
+    "utils/provenance.py": "7ac33105943b70d02a138a7eef73ccfb3ea45a5b0515df502152525b1a3b0aab",
+    "experiments/ablation.py": "fac8a9bcb75c5b1c26b4d228f612ae9c75d8ea316d79000d5ed34f73eaae36b2",
 }
 
 CONV_EXECUTION_V9_SOURCES = {
@@ -77,6 +92,21 @@ def verified_reporting_upgrade(name, old_hash, details):
     return verified_source_upgrade(name, old_hash, details, REPORTING_V2_SOURCES)
 
 
+def verified_line_endings(name, current_name, old_hash, current_hash, details):
+    """仅放行已认证归档与当前文件之间的 LF/CRLF 差异。"""
+    if details is None:
+        return False
+    current = Path(__file__).resolve().parents[1] / current_name
+    if not current.is_file() or file_sha256(current) != current_hash:
+        return False
+    content = current.read_bytes().replace(b"\r\n", b"\n")
+    for directory in ("source_resume", "source"):
+        old = Path(details) / directory / name
+        if old.is_file() and file_sha256(old) == old_hash and old.read_bytes().replace(b"\r\n", b"\n") == content:
+            return True
+    return False
+
+
 def verified_source_upgrade(name, old_hash, details, approved):
     if details is None or name not in approved:
         return False
@@ -106,6 +136,8 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
     checked_sources = ("model.py", "data.py") if manifest.get("format_version", 1) == 1 else (
         "model.py", "data.py", "train.py", "evaluate.py")
     version = manifest.get("format_version", 1)
+    if version >= 11:
+        checked_sources += ("utils/branch_timing.py", "experiments/ablation.py")
     if version >= 9:
         checked_sources += ("utils/operator_profile.py",)
     if version >= 6:
@@ -121,6 +153,15 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
         previous_hash = manifest["code_sha256"][name]
         current_name = LEGACY_SOURCE_PATHS.get(name, name) if version < 6 else name
         if previous_hash == code_hashes[current_name]:
+            continue
+        if verified_line_endings(name, current_name, previous_hash, code_hashes[current_name], details):
+            continue
+        if version == 11 and verified_source_upgrade(name, previous_hash, details, STD_REPORTING_V11_SOURCES):
+            print(f"Verified v11 standard-deviation reporting upgrade: {name}; training unchanged.", flush=True)
+            continue
+        if version <= 10 and (version == 10 or name == "utils/timing.py") and verified_source_upgrade(
+                name, previous_hash, details, BRANCH_SUMMARY_V10_SOURCES):
+            print(f"Verified v{version} branch-summary upgrade: {name}; training execution preserved.", flush=True)
             continue
         if version <= 9 and cfg.t2_conv_execution == "native" and (version == 9 or name == "model.py") and verified_source_upgrade(
                 name, previous_hash, details, CONV_EXECUTION_V9_SOURCES):

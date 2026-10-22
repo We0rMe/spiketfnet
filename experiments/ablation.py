@@ -8,10 +8,10 @@ import numpy as np
 
 from config import ABLATION_CONFIG, ABLATION_GROUPS, PROJECT_ROOT
 from data import file_sha256, prepare_data
-from evaluate import aggregate_matrix, read_history, run_path, write_text
+from evaluate import aggregate_matrix, format_stat, read_history, run_path, write_text
 from train import experiment_lock, run_experiment
 from utils.provenance import SOURCE_NAMES, validate_resume
-from utils.timing import timing_markdown, timing_rows, timing_totals
+from utils.branch_timing import timing_markdown, timing_rows, timing_totals
 
 
 def summarize_ablation(cfg, variants):
@@ -54,11 +54,9 @@ def summarize_ablation(cfg, variants):
                     statistics = aggregate_matrix(values, cfg.variance_ddof)
                     for scope in ("across_subjects", "across_repeats"):
                         item = statistics[scope]
-                        variance = item["variance"]
-                        display = (f"{item['mean']:.6f} ± {variance:.6f}" if variance is not None
-                                   else f"{item['mean']:.6f} ± NA")
+                        display = format_stat(item, 6)
                         rows.append(dict(window_ms=window, variant=variant, metric=metric, comparison=comparison,
-                                         scope=scope, **item, ddof=cfg.variance_ddof, mean_plus_variance=display))
+                                         scope=scope, **item, ddof=cfg.variance_ddof, mean_plus_std=display))
     for variant, runs in group_runs.items():
         time_rows.extend(timing_rows(timing_totals(runs, cfg.epochs), "all", variant=variant))
     totals = timing_totals(all_runs, cfg.epochs)
@@ -71,9 +69,17 @@ def summarize_ablation(cfg, variants):
         writer.writerows(rows)
     destination.with_suffix(".tmp").replace(destination)
     report = ["# 消融批次汇总", "", f"窗口：{cfg.windows_ms} ms；N={cfg.N}，M={cfg.M}。",
-              "仅统计当前选择的组、窗口、被试和种子；未记录的耗时不会补零。", "",
-              *[f"- [{variant}]({variant}/report.md)" for variant in variants], "",
-              "[ACC、ITR、配对差值与训练时间汇总](comparison.csv)"]
+              f"完整组的跨被试均值 ± 标准差（先平均各被试的种子，ddof={cfg.variance_ddof}）；未完成组不补零。", "",
+              "| 窗口 ms | 实验组 | 测试 ACC (%) | 测试 ITR (bits/min) |",
+              "| --- | --- | ---: | ---: |"]
+    for window in cfg.windows_ms:
+        for variant in variants:
+            selected = {row["metric"]: row for row in rows if row.get("comparison") == "absolute"
+                        and row["scope"] == "across_subjects" and row["window_ms"] == window and row["variant"] == variant}
+            displays = [format_stat(selected[key]) if key in selected else "—"
+                        for key in ("acc_percent", "itr_bits_per_minute")]
+            report.append(f"| {window} | [{variant}]({variant}/report.md) | {displays[0]} | {displays[1]} |")
+    report += ["", "[完整统计与配对差值](comparison.csv)"]
     report += timing_markdown(totals)
     write_text(cfg.output_root / "report.md", "\n".join(report) + "\n")
     return rows

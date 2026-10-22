@@ -136,7 +136,7 @@ class AblationTests(unittest.TestCase):
             for row in paired:
                 scale = row["window_ms"] / 500 if row["metric"] == "itr_bits_per_minute" else 1
                 self.assertEqual(row["mean"], 20 * scale)
-                self.assertEqual(row["variance"], 100 * scale ** 2 if row["scope"] == "across_subjects" else 0)
+                self.assertEqual(row["std"], 10 * scale if row["scope"] == "across_subjects" else 0)
 
     def test_legacy_default_and_variant_resume_rejection(self):
         old = self.cfg.to_dict()

@@ -14,8 +14,9 @@ from torch.utils.data import DataLoader
 from config import CONFIG, PROJECT_ROOT, Config
 from data import WindowDataset, file_sha256, prepare_data
 from experiments.variants import build_model
-from utils.timing import normalize_history, timing_markdown, timing_rows, timing_totals
-from utils.provenance import CONV_EXECUTION_V9_SOURCES, verified_source_upgrade
+from utils.timing import normalize_history
+from utils.branch_timing import timing_markdown, timing_rows, timing_totals
+from utils.provenance import CONV_EXECUTION_V9_SOURCES, verified_source_upgrade, verified_line_endings
 
 
 def write_text(path, text):
@@ -94,46 +95,42 @@ def plot_confusion(folder, cfg):
 
 
 def write_run_report(folder, cfg, history, provenance):
-    def number(value):
-        return "未记录" if value is None else f"{value:.4f}"
-    monitored = [row for row in history if row.get("monitor_loss") is not None]
+    folder = Path(folder)
     last = history[-1] if history else {}
-    lines = [f"# SpikeTFNet · S{provenance['test_subject']:02d} · seed {provenance['seed']}",
-             "", f"模型组别：{cfg.model_variant}。",
-             "", f"状态：{provenance['status']}；历史记录进度：{last.get('epoch', 0)}/{cfg.epochs} epoch。",
-             f"窗口：{provenance['window_ms']} ms；设备：{provenance.get('device', '未记录')}。",
-             f"训练被试：{provenance['training_subjects']}；训练 trial：{provenance['training_trials']}；"
-             f"测试 trial：{provenance['test_trials']}。",
-             "", "| 训练观察 | 最新记录 |", "| --- | ---: |",
-             f"| 训练联合 loss（Dropout 开） | {number(last.get('loss'))} |",
-             f"| 训练 ACC %（Dropout 开） | {number(last.get('train_acc_percent'))} |"]
+    monitored = [row for row in history if row.get("monitor_loss") is not None]
+    complete = provenance["status"] == "complete"
+    lines = [f"# SpikeTFNet · S{provenance['test_subject']:02d} · 测试结果" if complete
+             else f"# SpikeTFNet · S{provenance['test_subject']:02d} · 训练进度", "",
+             f"{cfg.model_variant}；seed {provenance['seed']}；{provenance['window_ms']} ms；"
+             f"{last.get('epoch', 0)}/{cfg.epochs} epoch；{provenance['status']}。", "",
+             "| 指标 | 结果 |", "| --- | ---: |"]
+    if complete:
+        metrics = json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
+        count = provenance["test_trials"]
+        lines += [f"| 测试 ACC | {metrics['acc_percent']:.4f}% |",
+                  f"| 测试 ITR | {metrics['itr_bits_per_minute']:.4f} bits/min |",
+                  f"| 正确 / 总试次 | {round(metrics['acc_percent'] * count / 100)} / {count} |"]
+    if last:
+        lines += [f"| 最后一轮训练 loss | {last['loss']:.4f} |",
+                  f"| 最后一轮训练 ACC（Dropout 开） | {last['train_acc_percent']:.2f}% |"]
     if monitored:
-        lines += [f"| 训练子集监测 epoch | {monitored[-1]['epoch']} |",
-                  f"| 训练子集监测联合 loss（Dropout 关） | {number(monitored[-1]['monitor_loss'])} |",
-                  f"| 训练子集监测 ACC %（Dropout 关） | {number(monitored[-1]['monitor_acc_percent'])} |"]
-    if provenance["status"] == "complete":
-        metrics = json.loads((Path(folder) / "metrics.json").read_text(encoding="utf-8"))
-        lines += ["", "固定末轮模型的测试结果：", "", "| 指标 | 数值 |", "| --- | ---: |",
-                  f"| ACC % | {metrics['acc_percent']:.4f} |",
-                  f"| ITR bits/min | {metrics['itr_bits_per_minute']:.4f} |",
-                  "", "![测试混淆矩阵](confusion.png)"]
+        monitor = monitored[-1]
+        lines += [f"| 训练子集监测 ACC（Dropout 关，epoch {monitor['epoch']}） | {monitor['monitor_acc_percent']:.2f}% |"]
+    lines += ["", f"训练 {len(provenance['training_subjects'])} 名源被试，S{provenance['test_subject']:02d} 留出测试。"
+              "固定末轮模型；训练子集监测不是验证集。"]
     lines += timing_markdown(timing_totals([(cfg.model_variant, history)], cfg.epochs))
-    if (Path(folder) / "details/t2_diagnostics.json").is_file():
-        lines += ["", "[T2 逐层/逐步及底层算子诊断](details/t2_diagnostics.json)。",
-                  "逐层计时覆盖升级后的 epoch；底层算子只采样每次启动/续训后首个新 epoch 的一个 batch。",
-                  "含 profiler 采样的 epoch 有额外开销，不能直接作为未插桩性能基准。"]
-    lines += ["", "训练集监测使用源训练被试的第一个 block，**不是独立验证集**，不能用于判断跨被试泛化。",
-              "不按监测值早停或选模型。留出被试只在固定最后一轮之后测试。",
-              f"监测间隔：{cfg.monitor_every}（0 为关闭）；历史中有监测值的 epoch：{len(monitored)}。",
-              "升级前缺少的监测值不回填；旧控制台输出无法恢复，日志中的 RECOVERED 行仅由已保存历史重建。",
-              "", "![训练过程](training.png)", "",
-              "[训练日志](training.log) · [原始训练历史](details/history.csv) · [配置与源码](../../../details/experiment.json)"]
-    write_text(Path(folder) / "report.md", "\n".join(lines) + "\n")
+    lines += ["", "![训练过程](training.png)"]
+    if complete:
+        lines += ["", "![测试混淆矩阵](confusion.png)"]
+    lines += ["", "[训练日志](training.log) · [逐轮记录](details/history.csv) · "
+              "[配置与源码](../../../details/experiment.json)"]
+    write_text(folder / "report.md", "\n".join(lines) + "\n")
 
 
 def refresh_progress(root, cfg):
-    rows, completed = [], 0
-    timing_runs = []
+    root = Path(root)
+    rows, completed, timing_runs = [], 0, []
+    results = {}
     for window in cfg.windows_ms:
         for subject in cfg.test_subjects:
             for seed in cfg.seeds:
@@ -146,23 +143,50 @@ def refresh_progress(root, cfg):
                 epoch = history[-1]["epoch"] if history else 0
                 acc, itr = "—", "—"
                 if status == "complete":
+                    if (provenance.get("test_subject"), provenance.get("seed"), provenance.get("window_ms")) != (subject, seed, window):
+                        raise ValueError(f"Mismatched completed run: {folder}")
                     metric = json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
-                    acc, itr = f"{metric['acc_percent']:.4f}", f"{metric['itr_bits_per_minute']:.4f}"
+                    results[window, subject, seed] = metric
+                    acc, itr = f"{metric['acc_percent']:.2f}", f"{metric['itr_bits_per_minute']:.2f}"
                     completed += 1
                 relative = folder.relative_to(root).as_posix()
                 link = f"[详情]({relative}/report.md)" if (folder / "report.md").exists() else "—"
                 rows.append(f"| {window} | S{subject:02d} | {seed} | {status} | {epoch}/{cfg.epochs} | {acc} | {itr} | {link} |")
     total = len(rows)
-    text = ["# SpikeTFNet 实验进度", "", f"已完成 **{completed}/{total}** 个任务。",
-            "部分结果：未完成项不计为 0，也不将部分任务均值称为完整 LOSO 结果。" if completed < total
-            else "全部任务已完成；正式统计见 [summary.csv](summary.csv)，按均值 ± 方差呈现。",
-            "", "| 窗口 ms | 测试被试 | seed | 状态 | epoch | ACC % | ITR bits/min | 报告 |",
-            "| --- | --- | --- | --- | --- | ---: | ---: | --- |", *rows, "",
-            "训练曲线的监测线来自训练子集，不是独立验证集。最终测试结果不参与早停或选模。",
-            "M=1 时没有独立种子重复，跨重复方差 0 不代表稳定性。",
-            "", "[主进程日志](details/experiment.log) · [实验配置及恢复记录](details/experiment.json)"]
+    text = ["# SpikeTFNet · LOSO 汇总", "", f"完成 **{completed}/{total}** 次实验；{cfg.model_variant}，N={cfg.N}，M={cfg.M}。",
+            "完整计划已完成。" if completed == total else "尚未完成；下表仅使用已完成测试，未完成项不补零。",
+            "", f"下表为同一种子下的跨被试 **均值 ± 标准差**（ddof={cfg.variance_ddof}）；单个观测记 NA。",
+            "", "| 窗口 ms | 种子 | 完成被试 / 计划 | 测试 ACC (%) | 测试 ITR (bits/min) |",
+            "| --- | --- | ---: | ---: | ---: |"]
+    for window in cfg.windows_ms:
+        for seed in cfg.seeds:
+            metrics = [results[window, subject, seed] for subject in cfg.test_subjects if (window, subject, seed) in results]
+            displays = [format_stat(metric_stats([m[key] for m in metrics], cfg.variance_ddof)) if metrics else "—"
+                        for key in ("acc_percent", "itr_bits_per_minute")]
+            text.append(f"| {window} | {seed} | {len(metrics)} / {cfg.N} | {displays[0]} | {displays[1]} |")
+    if cfg.M > 1:
+        for window in cfg.windows_ms:
+            if not all((window, subject, seed) in results for subject in cfg.test_subjects for seed in cfg.seeds):
+                continue
+            text += ["", f"{window} ms：先对每名被试的 {cfg.M} 个种子取均值，再汇总被试间差异："]
+            for key, label in (("acc_percent", "ACC (%)"), ("itr_bits_per_minute", "ITR (bits/min)")):
+                matrix = [[results[window, subject, seed][key] for seed in cfg.seeds] for subject in cfg.test_subjects]
+                stats = aggregate_matrix(matrix, cfg.variance_ddof)
+                text += [f"- {label}：{format_stat(stats['across_subjects'])}；"
+                         f"种子 LOSO 均值间：{format_stat(stats['across_repeats'])}。"]
+    else:
+        text += ["", "M=1：没有独立种子重复，种子间标准差为 NA；上表反映被试间差异。"]
+    text += ["", "ITR 先逐被试计算再平均。折间训练集重叠，不将所有折/种子视为独立重复。",
+             "", "<details>", "<summary>分折结果与训练进度</summary>", "",
+             "| 窗口 ms | 测试被试 | seed | 状态 | epoch | ACC % | ITR bits/min | 报告 |",
+             "| --- | --- | --- | --- | --- | ---: | ---: | --- |", *rows, "", "</details>"]
     text += timing_markdown(timing_totals(timing_runs, cfg.epochs))
-    write_text(Path(root) / "report.md", "\n".join(text) + "\n")
+    links = ["[实验日志](details/experiment.log)", "[配置与复现资料](details/experiment.json)"]
+    if (root / "summary.csv").exists():
+        links.insert(0, "[完整统计](summary.csv)")
+    text += ["", " · ".join(links)]
+    write_text(root / "report.md", "\n".join(text) + "\n")
+    return completed == total
 
 
 def write_json(path, payload):
@@ -284,15 +308,27 @@ def run_path(root, window_ms, subject, seed):
     return Path(root) / f"window_{window_ms:04d}ms" / f"test_S{subject:02d}" / f"seed_{seed}"
 
 
+def metric_stats(values, ddof):
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1 or not values.size or not np.isfinite(values).all() or ddof not in (0, 1):
+        raise ValueError("Invalid metric observations or standard-deviation ddof")
+    return {"count": len(values), "mean": float(np.mean(values)),
+            "std": float(np.std(values, ddof=ddof)) if len(values) >= 2 else None}
+
+
+def format_stat(item, digits=2):
+    std = f"{item['std']:.{digits}f}" if item["std"] is not None else "NA"
+    return f"{item['mean']:.{digits}f} ± {std}"
+
+
 def aggregate_matrix(matrix, ddof):
-    """matrix[subject, seed]；主统计是各 seed 的 LOSO 均值之间的方差。"""
+    """matrix[subject, seed]；分开报告跨被试与跨种子差异。"""
     matrix = np.asarray(matrix, dtype=float)
     if matrix.ndim != 2 or not matrix.size or not np.isfinite(matrix).all():
         raise ValueError("Invalid subject-by-seed metric matrix")
 
     def stats(values):
-        return {"count": len(values), "mean": float(np.mean(values)),
-                "variance": float(np.var(values, ddof=ddof)) if len(values) > ddof else None}
+        return metric_stats(values, ddof)
 
     return {"across_repeats": stats(matrix.mean(axis=0)),
             "across_subjects": stats(matrix.mean(axis=1)),
@@ -323,12 +359,11 @@ def summarize_experiment(root, cfg):
             groups += [("within_subject", f"S{s:02d}", st) for s, st in zip(cfg.test_subjects, stats["subjects"])]
             groups += [("within_repeat", str(seed), st) for seed, st in zip(cfg.seeds, stats["repeats"])]
             for scope, member, item in groups:
-                variance = item["variance"]
-                display = f"{item['mean']:.6f} ± {variance:.6f}" if variance is not None else f"{item['mean']:.6f} ± NA"
+                display = format_stat(item, 6)
                 rows.append({"window_ms": window, "metric": metric, "scope": scope, "member": member,
-                             **item, "ddof": cfg.variance_ddof, "mean_plus_variance": display})
-            main = rows[-len(groups)]["mean_plus_variance"]
-            print(f"{window} ms | {metric} | across repeats: {main}", flush=True)
+                             **item, "ddof": cfg.variance_ddof, "mean_plus_std": display})
+            main = format_stat(stats["across_subjects"], 6)
+            print(f"{window} ms | {metric} | across subjects (mean ± SD, N={cfg.N}, M={cfg.M}): {main}", flush=True)
         rows.extend(timing_rows(timing_totals(window_timing_runs, cfg.epochs), window, member="all"))
         all_timing_runs.extend(window_timing_runs)
     rows.extend(timing_rows(timing_totals(all_timing_runs, cfg.epochs), "all", member="all"))
@@ -339,6 +374,24 @@ def summarize_experiment(root, cfg):
         writer.writerows(rows)
     destination.with_suffix(".tmp").replace(destination)
     return rows
+
+
+def refresh_saved_reports(root):
+    """仅重建现有报告和统计，不加载 EEG、模型或覆盖原训练日志。"""
+    root = Path(root)
+    manifest = json.loads((root / "details/experiment.json").read_text(encoding="utf-8"))
+    cfg = Config.from_dict(manifest["config"])
+    for window in cfg.windows_ms:
+        for subject in cfg.test_subjects:
+            for seed in cfg.seeds:
+                folder = run_path(root, window, subject, seed)
+                path = folder / "details/provenance.json"
+                if path.exists():
+                    provenance = json.loads(path.read_text(encoding="utf-8"))
+                    write_run_report(folder, cfg, read_history(folder / "details/history.csv"), provenance)
+    if refresh_progress(root, cfg):
+        summarize_experiment(root, cfg)
+        refresh_progress(root, cfg)
 
 
 def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None):
@@ -353,11 +406,15 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
         known_native = (manifest.get("format_version", 1) <= 9 and cfg.t2_conv_execution == "native"
                         and verified_source_upgrade("model.py", manifest["code_sha256"]["model.py"],
                                                     root / "details", CONV_EXECUTION_V9_SOURCES))
-        if not known_native:
+        same_code = verified_line_endings("model.py", "model.py", manifest["code_sha256"]["model.py"],
+                                         file_sha256(Path(__file__).with_name("model.py")), root / "details")
+        if not known_native and not same_code:
             raise ValueError("Model source changed; use the archived source to replay this experiment")
     variant_key = "experiments/variants.py" if manifest.get("format_version", 1) >= 6 else "ablation_model.py"
     if manifest.get("format_version", 1) >= 4 and file_sha256(
-            PROJECT_ROOT / "experiments/variants.py") != manifest["code_sha256"][variant_key]:
+            PROJECT_ROOT / "experiments/variants.py") != manifest["code_sha256"][variant_key] and not verified_line_endings(
+                variant_key, "experiments/variants.py", manifest["code_sha256"][variant_key],
+                file_sha256(PROJECT_ROOT / "experiments/variants.py"), root / "details"):
         raise ValueError("Ablation model source changed; use the archived source")
     prepared = prepare_data(cfg) if prepared is None else prepared.validate(cfg)
     if prepared.metadata["fingerprint"] != manifest["dataset_fingerprint"]:

@@ -159,12 +159,12 @@ class CoreTests(unittest.TestCase):
         self.assertAlmostEqual(itr_bits_per_minute(1, 40, 1), 60 * math.log2(40))
         self.assertAlmostEqual(itr_bits_per_minute(.8, 40, 1.5), itr_bits_per_minute(.8, 40, 1) / 1.5)
 
-    def test_variance_and_hierarchical_aggregation(self):
+    def test_std_and_hierarchical_aggregation(self):
         stats = aggregate_matrix([[10, 30], [50, 70]], 0)
-        self.assertEqual(stats["across_repeats"], {"count": 2, "mean": 40., "variance": 100.})
-        self.assertEqual(stats["across_subjects"]["variance"], 400.)
-        self.assertEqual(aggregate_matrix([[20]], 0)["across_repeats"]["variance"], 0)
-        self.assertIsNone(aggregate_matrix([[20]], 1)["across_repeats"]["variance"])
+        self.assertEqual(stats["across_repeats"], {"count": 2, "mean": 40., "std": 10.})
+        self.assertEqual(stats["across_subjects"]["std"], 20.)
+        self.assertIsNone(aggregate_matrix([[20]], 0)["across_repeats"]["std"])
+        self.assertIsNone(aggregate_matrix([[20]], 1)["across_repeats"]["std"])
 
 
 if __name__ == "__main__":

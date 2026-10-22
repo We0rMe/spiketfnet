@@ -66,7 +66,7 @@ class Config:
     detach_reset: bool = False  # A：保留重置操作梯度
 
     gaze_shift_seconds: float = 0.5  # P：ITR 分母 = Tl+0.5 s
-    variance_ddof: int = 0  # 用户要求方差，不是标准差；默认总体方差
+    variance_ddof: int = 0  # 标准差分母修正：0 总体、1 样本；字段名兼容旧断点
     device: str = "cuda"  # 训练：auto/cpu/cuda/cuda:0/cuda:1；auto 优先使用 gpu_ids 中可用卡
     gpu_ids: tuple = (0, 1)  # auto/cuda 时，一张卡一个独立任务进程；单卡可设为 (0,)
     evaluation_device: str = "auto"  # 独立 evaluate.py：auto/cpu/cuda:0/cuda:1；训练后的测试跟随任务设备
@@ -75,8 +75,8 @@ class Config:
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
     t2_conv_execution: str = "native"  # native 保持旧轨迹；split_bias 将 d>1 卷积偏置外置，需新实验目录
     check_gradients: bool = False  # 调试开关：逐 batch 扫描全部梯度；正式训练关闭以减少开销
-    time_branches: bool = True  # T2 卷积/LIF 前后向总计、逐层、逐仿真步诊断；有插桩开销
-    t2_profile_batch: int = 2  # 首个新 epoch 采样第几个训练 batch 的底层算子；每次启动/续训一次，0 关闭采样
+    time_branches: bool = True  # 频域/时域完整分支前向+反向计时；整体训练用时始终记录
+    t2_profile_batch: int = 0  # 0 关闭细粒度诊断；>0 显式开启逐层计时并在首个新 epoch 指定 batch 采样
     resume: bool = True  # 同名实验自动跳过完成任务、从上个完整 epoch 恢复
     monitor_every: int = 5  # 每隔若干 epoch 监测源训练被试的 block 1；首/末轮也测，0 禁用
     plot_every: int = 1  # 每隔若干 epoch 覆盖更新曲线和单次报告；不产生逐轮图片
@@ -163,7 +163,7 @@ class Config:
         if any(d < 1 for d in self.dilations) or not 0 <= self.dropout < 1:
             raise ValueError("Invalid dilations or dropout")
         if self.variance_ddof not in (0, 1) or self.fft_scale not in ("none", "two_over_length"):
-            raise ValueError("Unsupported variance or FFT convention")
+            raise ValueError("Unsupported standard-deviation or FFT convention")
         if not 0 < self.band_hz[0] < self.band_hz[1] < self.sampling_rate / 2:
             raise ValueError("Invalid bandpass frequencies")
         if not 0 < self.spectrum_hz[0] < self.spectrum_hz[1] < self.sampling_rate / 2 or self.fft_resolution <= 0:

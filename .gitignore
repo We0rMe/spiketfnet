@@ -3,7 +3,9 @@ __pycache__/
 *.py[cod]
 cache/
 results/
+results_server/
 tmp/
 smoke_tests/results/
+smoke_tests/results_server/
 *.mat
 *.pdf

@@ -13,6 +13,7 @@ import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -24,7 +25,8 @@ from data import WindowDataset, file_sha256, loso_indices, prepare_data
 from evaluate import (evaluate_model, plot_confusion, plot_training, read_history, refresh_progress,
                       resolve_device, run_path, save_evaluation, summarize_experiment, write_json, write_run_report)
 from experiments.variants import build_model, joint_loss
-from utils.timing import BranchTimer, HISTORY_KEYS, normalize_history, timing_log, detailed_timing_log
+from utils.timing import BranchTimer, HISTORY_KEYS, normalize_history, detailed_timing_log, timing_log as diagnostic_log
+from utils.branch_timing import EpochBranchTimer, timing_log
 from utils.operator_profile import runtime_settings, model_parameters
 from utils.provenance import SOURCE_NAMES, validate_resume
 
@@ -56,11 +58,16 @@ def environment_info(device):
 
 
 def train_epoch(model, loader, optimizer, cfg, device, profile_batch=0):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    started = perf_counter()
     model.train()
     total_loss = torch.zeros((), dtype=torch.float64, device=device)
     correct = torch.zeros((), dtype=torch.long, device=device)
     count = 0
-    with BranchTimer(model, device, cfg.time_branches, profile_batch) as timer:
+    diagnostics_enabled = cfg.time_branches and cfg.t2_profile_batch > 0
+    with EpochBranchTimer(model, device, cfg.time_branches) as branches, BranchTimer(
+            model, device, diagnostics_enabled, profile_batch) as timer:
         for batch, (time, spectrum, labels) in enumerate(loader, 1):
             time, spectrum, labels = (value.to(device, non_blocking=True) for value in (time, spectrum, labels))
             optimizer.zero_grad(set_to_none=True)
@@ -70,10 +77,12 @@ def train_epoch(model, loader, optimizer, cfg, device, profile_batch=0):
             if not torch.isfinite(loss):
                 raise FloatingPointError("Nonfinite training loss")
             timer.prepare_backward(loss)
+            branches.prepare_backward(loss)
             try:
                 loss.backward()
             finally:
                 timer.end_backward()
+                branches.end_backward()
             if cfg.check_gradients:
                 finite_gradients = torch.stack([torch.isfinite(p.grad).all() for p in model.parameters()
                                                 if p.grad is not None]).all()
@@ -86,13 +95,16 @@ def train_epoch(model, loader, optimizer, cfg, device, profile_batch=0):
             count += len(labels)
         branch_times = timer.totals()
         diagnostics = timer.details()
+        whole_branch_times = branches.totals()
     if count == 0:
         raise ValueError("Empty training loader")
     finite_parameters = torch.stack([torch.isfinite(p).all() for p in model.parameters()]).all()
     if not finite_parameters:
         raise FloatingPointError("Nonfinite model parameters at epoch end")
-    return {"loss": total_loss.item() / count, "train_acc_percent": 100 * correct.item() / count,
-            "train_trials": count, **branch_times, "_t2_diagnostics": diagnostics}
+    result = {"loss": total_loss.item() / count, "train_acc_percent": 100 * correct.item() / count,
+              "train_trials": count, **branch_times, **whole_branch_times, "_t2_diagnostics": diagnostics}
+    result["train_seconds"] = perf_counter() - started
+    return result
 
 
 class Tee:
@@ -368,8 +380,8 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
     write_json(private / "provenance.json", provenance)
     print(f"TRAIN {len(training_rows)} trials; MONITOR {len(monitor_rows)} source block-1 trials (NOT validation); "
           f"TEST {len(test_rows)} trials after epoch {cfg.epochs} only.", flush=True)
-    print(f"MODEL {cfg.model_variant}; T2 Conv/LIF timing={'ON' if cfg.time_branches else 'OFF'} "
-          "(four totals + layer/step detail; other operations excluded).", flush=True)
+    print(f"MODEL {cfg.model_variant}; branch timing={'ON' if cfg.time_branches else 'OFF'}; "
+          f"T2 diagnostics={'ON' if cfg.time_branches and cfg.t2_profile_batch > 0 else 'OFF'}", flush=True)
     print("T2 RUNTIME " + json.dumps(provenance["timing_environment"], ensure_ascii=False), flush=True)
     print("MODEL PARAMETERS " + json.dumps(provenance["model_parameters"], ensure_ascii=False), flush=True)
     print(f"T2 CONV EXECUTION {cfg.t2_conv_execution}", flush=True)
@@ -400,6 +412,8 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
             print(f"[{device}] {window}ms S{subject:02d} seed={seed} epoch={epoch}/{cfg.epochs} "
                   f"loss={row['loss']:.4f} train_ACC={row['train_acc_percent']:.2f}% "
                   f"{monitor_text}{timing_log(row)}", flush=True)
+            if row.get("_t2_diagnostics") is not None:
+                print(f"[{device}] epoch={epoch} {diagnostic_log(row)}", flush=True)
             for line in detailed_timing_log(row.get("_t2_diagnostics")):
                 print(f"[{device}] epoch={epoch} {line}", flush=True)
         atomic_torch_save(model.state_dict(), private / "model.pt")
@@ -552,8 +566,8 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
                 "parallel_strategy": "independent window/subject/seed jobs, one worker per device",
                 "dataset_fingerprint": prepared.metadata["fingerprint"], "code_sha256": code_hashes,
                 "selected_trial_count": len(prepared.ids), "selection": "final epoch only; no target-dependent selection",
-                "statistics": "Population variance by default, not standard deviation; ITR computed per subject/seed first"}
-    manifest.update(format_version=10, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
+                "statistics": "Mean +/- standard deviation; ddof from config.variance_ddof; ITR computed per subject/seed first"}
+    manifest.update(format_version=12, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
                     monitoring="Source training block 1 in eval mode; no validation set or test-based selection")
     if previous is not None:
         manifest["created_utc"] = previous["created_utc"]

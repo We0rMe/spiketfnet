@@ -97,9 +97,9 @@ results/ablation/
 每组沿用实时日志、覆盖更新的曲线及每 epoch 滚动恢复文件 `details/resume.pt`。`resume=True` 时再次执行 `python -m experiments.ablation` 即可续训；完成的任务跳过，不重复训练。
 窗口、折和种子仍各自独立。恢复校验包括组别、配置、源码和数据，不能将 full 的断点当成其他组的起点。
 
-`comparison.csv` 的 ACC/ITR 行只汇总本次配置选中的、在该窗口下所有请求折/种子均完成的组。分别列出跨被试与跨种子的均值和方差。
+`comparison.csv` 的 ACC/ITR 行只汇总本次配置选中的、在该窗口下所有请求折/种子均完成的组。分别列出跨被试与跨种子的均值和标准差。
 当 full 组也完成时，额外计算其他组减 full 的配对差值，先按相同被试/种子相减再汇总。
-M=1 时跨种子的总体方差为零，不代表结果稳定；可查看跨被试统计。
+M=1 时种子间标准差记 NA；报告主表使用跨被试均值 ± 标准差（先对每名被试平均种子，ddof 沿用配置）。
 中途停止时可能只有部分组有总表行，各组 report.md 显示各自进度。
 若此前逐组运行，将 `ABLATION_GROUPS` 恢复为上面的四组列表后再次启动，会跳过已完成任务并重新生成四组比较表。
 
@@ -107,19 +107,19 @@ M=1 时跨种子的总体方差为零，不代表结果稳定；可查看跨被�
 真实逐 trial 预测、身份及辅助输出保留在 evaluation.npz，不另存重复预测文件。
 ITR 沿用原公式，500 ms 时选择周期为 0.5 + 0.5 = 1.0 s。
 
-新版实验清单为 v10。v9 四组已验证通过认证后保持 native 路径续训；更早版本已有迁移规则保留，旧模型代码必须通过固定摘要认证、恢复为 native，预处理和科学配置仍须兼容。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。详见 [膨胀卷积改善与数值边界](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
+新版实验清单为 v12。v11 四组已验证通过认证后保持 split_bias 路径续训；更早版本已有迁移规则保留，旧模型代码必须通过固定摘要认证、恢复为 native，预处理和科学配置仍须兼容。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。详见 [膨胀卷积改善与数值边界](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
 旧配置缺少 model_variant 时解释为 full，不放宽未知源码变更的校验。
 升级服务器前应先停止旧进程及其子进程，再同步代码，保留结果目录和原配置，以 `python train.py` 继续原完整模型实验。
 原 1000 ms 实验使用原输出路径，消融使用新根目录，不移动旧权重。
 
-## 联合训练与第二模块诊断
+## 联合训练与耗时
 
 完整模型对每个 batch 依次计算频域、时域分支，再融合；主 CE 与辅助 CE 相加后只调用一次 backward 和一次 Adam.step，两个分支及融合模块联合优化。
 没有分别预训练后再融合，也没有把同一个模型的两个分支分放到两张卡。两张卡运行的是不同 LOSO 任务。
 
-`CONFIG.time_branches=True` 当前只开启第二模块的算子诊断。先显示 T2 Conv Forward / T2 Conv Backward / T2 LIF Forward / T2 LIF Backward 四项秒数，再附逐层、逐仿真步、主机提交区间和调用数，不显示 trial 均值。full、temporal_only、equal_fusion 使用同一计时范围，spectral_only 四项为 0。
+`CONFIG.time_branches=True` 默认记录 Spectral Times、Temporal Times、Total Time。两分支分别含前向+反向，总时间含完整训练循环；日志不显示 trial 均值。各组共用同一口径，缺失分支为 0。沿用 report.md、summary.csv/comparison.csv 展示累计、均摊及覆盖率，旧局部计时不伪造为完整分支时间。
 
-`CONFIG.t2_profile_batch=2` 在每个任务每次启动/续训后的首个新 epoch 对一个 batch 采样底层算子及 CUDA kernel；0 关闭此采样。采样有明显开销，后续 epoch 不重复采样。详细记录集中到该任务 `details/t2_diagnostics.json`，运行时配置写入 provenance.json；现有四项及汇总保留，旧 epoch 没有细节的不补造。模型与训练计算保持不变，计时、同步排查及研究依据详见 [第二模块诊断与排查](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
+`CONFIG.t2_profile_batch=0` 默认关闭细粒度计时与 profiler。>0 才开启逐层/逐步诊断，并在每次启动后首个新 epoch 采样指定 batch；旧日志与诊断记录保留。模型和优化过程不变，详见 [第二模块诊断与排查](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
 
 ## 本地验证
 

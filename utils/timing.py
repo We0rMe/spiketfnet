@@ -14,8 +14,11 @@ from utils.operator_profile import OperatorSample, sample_log
 PARTS = ("temporal2_conv_forward", "temporal2_conv_backward", "temporal2_lif_forward", "temporal2_lif_backward")
 TIME_KEYS = tuple(f"{name}_seconds" for name in PARTS)
 TIME_LABELS = ("T2 Conv Forward", "T2 Conv Backward", "T2 LIF Forward", "T2 LIF Backward")
+SUMMARY_KEYS = ("spectral_train_seconds", "temporal_train_seconds", "train_seconds")
+SUMMARY_LABELS = ("Spectral Times", "Temporal Times", "Total Time")
 HISTORY_KEYS = ("epoch", "loss", "train_acc_percent", "train_trials", *TIME_KEYS,
-                *(key + "_per_trial" for key in TIME_KEYS), "monitor_loss", "monitor_acc_percent")
+                *(key + "_per_trial" for key in TIME_KEYS), "monitor_loss", "monitor_acc_percent",
+                *SUMMARY_KEYS, *(key + "_per_trial" for key in SUMMARY_KEYS))
 
 
 def graph_nodes(tensors, stop=()):
@@ -220,16 +223,16 @@ def normalize_history(history, training_trials=None):
         if original.get("_t2_diagnostics") is not None:
             row["_t2_diagnostics"] = original["_t2_diagnostics"]
         row["train_trials"] = original.get("train_trials") or training_trials
-        for key in TIME_KEYS:
+        for key in (*TIME_KEYS, *SUMMARY_KEYS):
             value, count = row[key], row["train_trials"]
             row[key + "_per_trial"] = value / count if value is not None and count else None
         result.append(row)
     return result
 
 
-def timing_log(row):
+def timing_log(row, keys=TIME_KEYS, labels=TIME_LABELS):
     fields = []
-    for key, label in zip(TIME_KEYS, TIME_LABELS):
+    for key, label in zip(keys, labels):
         value = row.get(key)
         seconds = f"{value:.3f}s" if value is not None else "NA"
         fields.append(f"{label}={seconds}")
@@ -263,13 +266,14 @@ def detailed_timing_log(details):
     return lines
 
 
-def timing_totals(runs, epochs):
+def timing_totals(runs, epochs, keys=TIME_KEYS):
     """runs 为 (variant, history) 列表；缺失计时不冒充 0 或完整总时长。"""
     result = {}
-    for key in TIME_KEYS:
+    for key in keys:
         values, expected, trials = [], 0, []
         for variant, history in runs:
-            absent = variant == "spectral_only"
+            absent = ((variant == "spectral_only" and (key in TIME_KEYS or key == "temporal_train_seconds"))
+                      or (variant == "temporal_only" and key == "spectral_train_seconds"))
             if absent:
                 continue
             expected += epochs
@@ -290,10 +294,10 @@ def timing_totals(runs, epochs):
     return result
 
 
-def timing_markdown(totals):
+def timing_markdown(totals, keys=TIME_KEYS, labels=TIME_LABELS):
     lines = ["", "| 训练时间累计 | 总时长（秒 / 小时） | 已记录部分平均（秒/trial） | 有计时的 epoch / 应记录 epoch |",
              "| --- | ---: | ---: | ---: |"]
-    for key, label in zip(TIME_KEYS, TIME_LABELS):
+    for key, label in zip(keys, labels):
         item = totals[key]
         value = item["total_seconds"]
         if item["expected_epochs"] == 0:
@@ -307,6 +311,9 @@ def timing_markdown(totals):
         trial = item["seconds_per_trial"]
         trial_text = f"{trial:.6f}" if trial is not None else "未记录"
         lines.append(f"| {label} | {display} | {trial_text} | {item['recorded_epochs']} / {item['expected_epochs']} |")
+    if keys == SUMMARY_KEYS:
+        return lines + ["", "分支时间含前向和反向；Total Time 为训练循环总用时，不含监测、测试和文件保存。",
+                        "多任务按任务累计；秒/trial 按实际处理次数均摊。旧版缺项保留未知，覆盖率见表。"]
     lines += ["", "仅统计第二模块 temporal.blocks：所有膨胀/逐点卷积及所有 LIF，跨残差块和仿真步累计。",
               "前向按层调用包围；反向按归属 autograd 节点的执行前后包围，含 LIF 跨步膜电位与重置梯度。",
               "BN、Dropout、残差相加、其他模块、loss 和优化器不计入这四项。四项之和不代表整模块或整轮时间。",
@@ -319,4 +326,4 @@ def timing_markdown(totals):
 
 def timing_rows(totals, window, **identity):
     return [dict(window_ms=window, metric=key, scope="training_time_total", **identity, **totals[key])
-            for key in TIME_KEYS]
+            for key in totals]

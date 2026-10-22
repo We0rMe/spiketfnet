@@ -13,7 +13,7 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 | `evaluate.py` | ACC/ITR、分层统计及已保存模型的重新评估 |
 | `experiments/ablation.py` | 消融批次入口、组间汇总；复用根目录的训练与评估流程 |
 | `experiments/variants.py` | 原始模型与消融组的构建、各组损失；复用 `model.py` 中的分支 |
-| `utils/timing.py` | 分支计时与耗时统计 |
+| `utils/branch_timing.py`、`utils/timing.py` | 三项分支摘要、可选细粒度诊断及历史兼容 |
 | `utils/operator_profile.py` | 第二模块底层算子采样、运行时配置记录 |
 | `utils/provenance.py` | 源码归档清单、历史版本认证与断点兼容校验 |
 | `docs/` | 复现计划、实现约定及消融运行说明 |
@@ -86,36 +86,29 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 结果位于 `results/ablation/<组别>/`，各组独立恢复；总表为 `results/ablation/comparison.csv`。
 单分支保留对应融合投影和最终分类头，等权组使用固定 0.5/0.5。详见 [消融运行与实现约定](docs/ABLATION.zh-CN.md)。
 
-新版清单为 v10，源码快照保留 `experiments/`、`utils/` 的目录结构。支持经归档源码摘要验证的旧断点迁移；v9 四组已验证 native 路径继续训练。`model.py` 增加可选执行方式，旧模型仅允许恢复为 native；数据和参数键名不变，旧完整模型仍以 `python train.py` 继续。
-新消融实验不能接续其他组权重。验证说明见消融文档和 smoke_tests/results/timing_check/report.md。
+新版清单为 v12，按更正后的要求统一展示均值 ± 标准差，保留三项分支时间和统计轴；模型计算和参数键名不变。已验证 v11 四组 split_bias 断点续训与旧版连续训练结果逐位一致；更早版本的认证迁移规则保留。新消融实验不能接续其他组权重。
 
 ## 耗时和恢复
 
-当前诊断只统计第二时域模块 `temporal.blocks` 的卷积和 LIF。`time_branches=True` 开启，日志保留 loss/ACC/训练子集监测指标，先显示四项总计：
+默认 `time_branches=True`、`t2_profile_batch=0`，每个 epoch 只显示三项时间，不显示每 trial 均摊值：
 
 ```text
-T2 Conv Forward=...s | T2 Conv Backward=...s | T2 LIF Forward=...s | T2 LIF Backward=...s
+Spectral Times=...s | Temporal Times=...s | Total Time=...s
 ```
 
-卷积包含该模块所有膨胀卷积与逐点卷积，LIF 包含全部残差块中的 LIF；累计所有仿真步和 batch。前向、反向分开统计，BN、Dropout、残差相加和其他模块暂不计时。四项之和不代表整个模块或 epoch 的总时间。日志不显示每 trial 均摊值。
+前两项包含对应完整分支的前向与反向，CUDA 使用同流 Event，epoch 末同步后读取；区间可能包含主机提交间隙，不等于纯 kernel 执行时间。融合/损失/Adam 不算入两分支。Total Time 是训练循环墙钟时间，包含数据迭代、搬运、完整前反向、Adam、计时开销及末尾 GPU 等待；不含训练子集监测、测试、保存和绘图。两分支之和不要求等于总时间。多卡任务累计是各任务时长之和，不是两卡并行运行的实际经过时间。
 
-四项后逐层输出 `T2 LAYER`：每个残差块的膨胀/逐点 Conv 和 LIF，共 12 层；显示前后向秒数、Host 提交区间、调用/节点数、最大前向区间以及各仿真步秒数。`Bshared` 单列跨仿真步共享的参数梯度累积。层名的第一个数字从 0 开始，例如 `1.dilated.0` 为第二块的膨胀卷积。
+`training.log` 实时追加；`details/history.csv` 保存 epoch 秒数及处理试次数；单次/实验/消融报告和原有汇总表保存三项累计、每 trial 均摊及覆盖率。均摊分母是对应已记录 epoch 内全部 batch 实际处理的样本次数之和，例如完整 35 被试 LOSO 每轮为 8160，而不是 batch size 128；跨轮同一 trial 每次参与训练都计一次。它不是 batch=1 推理延迟。缺失分支为 0，关闭计时的现存分支为 NA。
 
-`t2_profile_batch=2` 在每次启动/续训后，每个未完成任务的首个新 epoch 采样第 2 个训练 batch（不足时取末 batch）。`T2 SAMPLE/BACKEND/KERNEL` 记录底层算子、实际卷积后端和 CUDA kernel；CUPTI/kernel 数据不可用时明确为 NA。采样会明显增加该 batch 开销，后续 epoch 只做细粒度事件计时。设为 0 可关闭重型采样，仍保留逐层计时。
+旧版只有 T2 局部计时，无法恢复完整分支/epoch 时长，因此保留未知。已存在的日志、细粒度历史不删改，新三项从后续 epoch 开始记录；报告明确已记录 epoch 数，不把部分累计称为完整总时长。
 
-每轮细节集中在任务 `details/t2_diagnostics.json`，包含各层/仿真步/反向节点、batch size、首次与后续 batch 分组、是否采样及算子/kernel 汇总；不生成逐 batch 文件或大体积 trace。`training.log` 保存可读输出；`details/provenance.json` 中的 `timing_environment` 记录实际 worker 的 PyTorch/cuDNN、确定性及 TF32 设置，`model_parameters` 保存实际总量和分支/子模块参数数目（日志为 `MODEL PARAMETERS`）。
-
-沿用原有文件：training.log 实时追加，details/history.csv 保存四项 epoch 秒数、实际 trial 次数及均摊值，任务 report.md 与已有 summary.csv/comparison.csv 汇总累计时间、均摊值和覆盖率。均摊值使用所有对应 batch 实际处理的样本总数，不是单个 batch size，也不是单 trial 独立延迟。消融删除第二模块时为 0；关闭计时时现存模块为 NA。
-
-CUDA 使用同流 Event，前向包围层调用、反向包围归属节点，epoch 末同步后读数；没有逐层手工同步，采样 batch 的 profiler 收尾可能同步。v8 已有四项计时保留，更早版本缺失值不反推；新增细节仅从升级后的 epoch 开始。旧日志原文保留。模型、单步 torch 后端及训练数值过程保持不变，本轮只做诊断。
-
-完整的计时边界、异步/同步检查、研究依据和解释限制见 [第二模块诊断与排查](docs/TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
+需要再次诊断时显式设 `t2_profile_batch>0`：开启每轮 T2 逐层/逐步诊断，并在每次启动后首个新 epoch 的指定 batch 做一次 profiler 采样。设 0 同时关闭细粒度 hooks 和采样。详细记录集中在原 `details/t2_diagnostics.json`，不新增逐 batch 文件。`provenance.json` 继续记录实际 worker 环境和模型参数量。完整边界与服务器性能结果见 [第二模块诊断与排查](docs/TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
 
 每个任务开始时保存 epoch 0，之后每个完整 epoch 原子替换 `details/resume.pt`。该文件包含模型、Adam 状态、epoch、训练历史、Python/NumPy/Torch/CUDA 随机状态和 DataLoader 的打乱生成器状态。中途停止后，执行同一条 `python train.py` 即从最后成功保存的 epoch 后继续；当前未保存的 epoch 会重做。最终测试成功后删除恢复文件，只保留 `model.pt`。checkpoint 是恢复用途，测试仍只使用固定最后一轮模型。
 
 恢复会校验数据指纹、trial 身份、模型/预处理和训练设置。可调整 N、M、起始 seed 和设备分配；学习率、batch size、epoch 总数、网络参数、确定性设置变化必须使用新实验名。窗口修改仍要求预处理指纹一致。新格式还校验训练与评估代码哈希；环境或 CPU/CUDA 后端变化不保证逐位相同，运行环境会记入恢复记录。
 
-断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2–v9 源码（兼容 LF/CRLF 换行），才允许升级至 v10。旧消融模型按原名校验并映射到新路径；旧计时工具仅在固定摘要认证通过后升级。native 路径的模型计算、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。执行模式改变需新建实验，不能把参数可加载误认为数值轨迹完全一致。
+断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2–v11 源码（兼容 LF/CRLF 换行），才允许升级至 v12。旧消融模型按原名校验并映射到新路径；旧计时工具仅在固定摘要认证通过后升级。native 路径的模型计算、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。执行模式改变需新建实验，不能把参数可加载误认为数值轨迹完全一致。
 
 升级步骤：先停止服务器现有训练并确认子进程退出；同步新版代码；保留原 `experiment_name`、数据路径、N/M/seed 和科学参数，保持 `resume=True`；再次运行 `python train.py`。无需重命名、搬动或删除现有结果目录。已完成任务只补充展示文件，不重新训练；未完成任务从 checkpoint 的 epoch 继续。不要在训练仍运行时单独启动 `evaluate.py`。
 
@@ -131,7 +124,7 @@ CUDA 使用同流 Event，前向包围层调用、反向包围归属节点，epo
 
 从旧版升级时，完整任务会核验并复用；旧版中途任务没有权重时会明确打印 `no saved weights; restart from epoch 1`，把原曲线留到 `details/history_before_restart.csv` 后重训。旧版若已经写出末轮权重而测试中断，则只补完测试。旧版未保存的中途参数无法恢复。原始源码快照保留，恢复时执行的源码放在 `details/source_resume/`，变更配置及环境记录在原 `experiment.json` 中。
 
-从 M=3 改为 M=1 时，保持起始 seed 不变即可只运行/统计该种子。已完成的该种子任务会跳过，其他种子的目录保留但不参与汇总；程序在恢复期间移除旧范围的 `summary.csv`，成功后重新生成。M=1 的跨重复方差为 0，仅表示没有独立重复，不能作为稳定性证据。
+从 M=3 改为 M=1 时，保持起始 seed 不变即可只运行/统计该种子。已完成的该种子任务会跳过，其他种子的目录保留但不参与汇总；程序在恢复期间移除旧范围的 `summary.csv`，成功后重新生成。M=1 的种子间标准差显示 NA；主报告与结束日志展示跨被试差异。
 
 本轮性能检查发现：旧版逐 batch 扫描全部梯度、读取 loss/ACC 标量会产生额外 GPU 操作和同步。现在把梯度扫描设为调试开关，loss/ACC 在设备上累计至 epoch 末，再读取一次；保留逐 batch loss 有限性检查，并在 epoch 末检查全部参数。数据传输使用 `non_blocking=True`；测试的脉冲计数也在设备上累计，最后回传。该方向与 [PyTorch 性能指南](https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html) 一致，实际收益需在服务器计时。模型结构、FP32、Ts=4、batch size 和确定性设置未改变，逐仿真步的脉冲计算仍有开销。
 
@@ -139,8 +132,8 @@ CUDA 使用同流 Event，前向包围层调用、反向包围归属节点，epo
 
 ```text
 results/spiketfnet/
-  report.md                           # 当前任务进度、已完成任务指标及报告链接
-  summary.csv                         # 唯一汇总表，包含“均值 ± 方差”列
+  report.md                           # 跨被试测试 ACC/ITR 汇总、折叠的分折进度及耗时
+  summary.csv                         # 唯一汇总表，包含“均值 ± 标准差”列
   details/
     experiment.log                    # 主进程调度、恢复和错误日志
     experiment.json                   # 配置、版本、用途、状态、代码哈希
@@ -164,18 +157,27 @@ results/spiketfnet/
 
 双进程运行时总进度报告约每 5 秒刷新；单进程在任务完成时刷新。未完成时报告明确标为部分结果，不将缺失任务当作 0；正式 `summary.csv` 仍在当前 N×M 全部完成后生成。日志是追加文件，曲线与报告覆盖更新，不生成每 epoch 一套文件。
 
+已完成的旧实验无需重新训练或推理，停止训练后可直接从原指标重建报告（路径换成自己的实验根目录）：
+
+```python
+from evaluate import refresh_saved_reports
+refresh_saved_reports(r"G:\SSVEP\SpikeTFNet\results_server\spiketfnet")
+```
+
+这只覆盖 report.md 和完整实验的 summary.csv，不改指标、日志、配置、权重或预测。单折报告首先呈现最终测试 ACC/ITR、正确试次数，随后保留训练表现、三项耗时与曲线；实验根报告首先呈现各种子的跨被试测试统计，多种子全部完成后补充种子平均后的跨被试统计及种子间统计。
+
 ## 统计口径
 
 先对每个测试被试、每个种子计算 ACC 与 ITR。ACC 的单位是百分数；ITR 使用 40 类，决策时间为窗口秒数 + 0.5，P≤1/40 时为 0；P=1 按极限处理。
 
 设指标矩阵为 `A[被试, 种子]`。`summary.csv` 的不同 scope 分开呈现：
 
-- `across_repeats`：每个种子先对 N 名测试被试求均值，再对 M 个完整重复实验求均值和方差，作为主要多轮统计。
-- `across_subjects`：先对每名被试的 M 个种子求均值，再统计 N 名被试的均值和方差，用于观察跨被试差异。
-- `within_subject`：单名被试在 M 个种子间的均值和方差。
-- `within_repeat`：单个种子在 N 名被试间的均值和方差。
+- `across_repeats`：每个种子先对 N 名测试被试求均值，再对 M 个完整重复实验求均值和标准差，表示种子重复的稳定性；M=1 时标准差为 NA。
+- `across_subjects`：先对每名被试的 M 个种子求均值，再统计 N 名被试的均值和标准差，作为结束日志的主要汇总，观察跨被试差异。
+- `within_subject`：单名被试在 M 个种子间的均值和标准差。
+- `within_repeat`：单个种子在 N 名被试间的均值和标准差。
 
-默认 `variance_ddof=0`，确实输出方差而非标准差。方差单位是原指标单位的平方；“均值 ± 方差”是按用户要求的展示，不是置信区间。只有一个观测值时总体方差为 0，不代表结果稳定。若改为 ddof=1，单观测的方差显示 NA。ITR 先逐被试计算再汇总，不用平均 ACC 直接代入。
+当前输出标准差 SD，与均值单位一致；它不是标准误或置信区间。沿用 `variance_ddof=0`（总体标准差，分母 n），设为 1 则为样本标准差（分母 n−1）；字段名保留以兼容旧配置/断点。仅一个观测时 SD 记 NA，两个以上相同观测的真实零 SD 保留。参考 SSVEPformer 采用 ddof=1，严格对照时应统一此参数。CSV 使用 std、mean_plus_std 字段，不再使用 variance、mean_plus_variance。ITR 仍先逐被试计算再汇总。
 
 训练曲线不含逐 epoch 测试表现，避免据测试集选模型。重新对同一模型做确定性测试不会构成新的独立实验；多轮测试由不同 seed 的独立训练实现。
 
@@ -200,7 +202,7 @@ results/spiketfnet/
 
 `run_reporting_smoke.py` 使用 `smoke_tests/fixtures/` 中冻结的 v2 源码生成真实旧断点，与新版监测、实时输出及双进程恢复作对照。结果在 `smoke_tests/results/reporting_check/`。冻结源码仅供冒烟测试，不是服务器训练入口。
 
-`run_layout_smoke.py` 默认验证修改前 v9 四组断点升级到 v10 native 的训练轨迹、细粒度计时、历史、汇总及源码归档，结果在 smoke_tests/results/conv_execution_check/。可从 Python 调用 main(output_name="新目录", version=5/6/7/8) 检查更早版本。run_ablation_smoke.py 覆盖四组双进程调度与 v3 恢复，run_timing_smoke.py 覆盖 v4 恢复。全部为 CPU 小样本测试，不能代替服务器 GPU 性能测量。
+`run_layout_smoke.py` 默认验证 v11 四组 split_bias 断点升级到 v12 的训练轨迹、预测、历史、标准差汇总和源码认证，结果在 smoke_tests/results/std_reporting_check/。可从 Python 调用 main(output_name="新目录", version=5/6/7/8/9/10) 验证更早版本。全部为 CPU 小样本，不能代替服务器 GPU 性能测量。
 
 ## 膨胀卷积性能改善（可选）
 

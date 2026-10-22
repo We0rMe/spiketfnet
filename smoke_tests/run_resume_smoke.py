@@ -101,7 +101,7 @@ def main():
     with (resumed / "summary.csv").open(encoding="utf-8-sig") as handle:
         summary = list(csv.DictReader(handle))
     assert all(row["member"] == "42" for row in summary if row["scope"] == "within_repeat")
-    assert all(float(row["variance"]) == 0 for row in summary if row["scope"] == "across_repeats")
+    assert all(row["std"] == "" for row in summary if row["scope"] == "across_repeats")
     reevaluate_experiment(resumed, prepared=selected, device_name="cpu")
 
     # 旧版无 resume 文件：完成任务可升级复用，未完成任务明确从零重训。
