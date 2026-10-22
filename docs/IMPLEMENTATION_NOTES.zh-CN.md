@@ -118,3 +118,9 @@ SpikingJelly 的输入衰减和硬重置语义依据其 [LIFNode 文档](https:/
 支持固定摘要认证的 v8 train/evaluate/timing/provenance 升级到 v9，更早版本规则保留；v8 四项时间保留，新细节不补造历史。新采样工具纳入源码归档与后续恢复校验。真实 Benchmark 小样本上验证四组 v8 中断后恢复与原版连续训练权重、预测、训练/监测指标一致；本机没有 CUDA，GPU 性能结论待服务器验证。
 
 用户补充的效率表属于 12 类、0.5 s：3.016 M 参数、32.016 M FLOPs、836.362 K SOPs、2.735 ms/trial；SOPs 为 1,800 个未见 trial 均值。当前 40 类模型实算 4,584,088 个可训练参数，数据集输入/输出尺寸不同，不能仅因总量不同判定复现偏差。启动日志及 provenance 增加参数分解记录；当前只诊断，不修改结构以拟合这张 12 类表。
+
+## 膨胀卷积偏置外置（v10）
+
+服务器证据确认 d=2/4 调用 slow_conv_dilated2d，单层单 batch 的 copy_ 次数为 128×64×4=32768。新增可选 t2_conv_execution=split_bias，仅在 T2 的 d>1 卷积中保留原 bias 参数并在卷积后广播相加；native 默认保留原计算。参数键名、尺寸与数学定义不变，但浮点求和及梯度归约顺序可能变化，不能保证 SNN 完整训练轨迹不变。
+
+当前已完成 31 折的实验建议 native 完成；模式切换需独立 experiment_name / ABLATION_ROOT。严格认证的 v9 源码可升级 v10 native，未知源码仍拒绝，旧配置即使没有执行字段也始终恢复为 native。新增 CPU 双精度卷积输出/梯度检查、默认模型旧新逐位检查、四组 v9 断点升级与新 split_bias 模式中断恢复检查。GPU 收益由 smoke_tests/run_conv_benchmark.py 在空闲卡上验证；CPU 速度不作 GPU 结论。未修改依赖或关闭确定性。

@@ -310,6 +310,7 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
     resume_file = private / "resume.pt"
     provenance = {"status": "training", "purpose": purpose, "test_subject": subject,
                   "model_variant": cfg.model_variant,
+                  "t2_conv_execution": cfg.t2_conv_execution,
                   "training_subjects": sorted(set(prepared.ids[training_rows, 0].tolist())),
                   "seed": seed, "window_ms": window, "epochs": cfg.epochs,
                   "device": str(device), "worker_pid": os.getpid(),
@@ -371,6 +372,7 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
           "(four totals + layer/step detail; other operations excluded).", flush=True)
     print("T2 RUNTIME " + json.dumps(provenance["timing_environment"], ensure_ascii=False), flush=True)
     print("MODEL PARAMETERS " + json.dumps(provenance["model_parameters"], ensure_ascii=False), flush=True)
+    print(f"T2 CONV EXECUTION {cfg.t2_conv_execution}", flush=True)
     first_new_epoch = len(history) + 1
     with preserved_rng(generator, device):
         update_run_artifacts(folder, cfg, history, provenance)
@@ -551,7 +553,7 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
                 "dataset_fingerprint": prepared.metadata["fingerprint"], "code_sha256": code_hashes,
                 "selected_trial_count": len(prepared.ids), "selection": "final epoch only; no target-dependent selection",
                 "statistics": "Population variance by default, not standard deviation; ITR computed per subject/seed first"}
-    manifest.update(format_version=9, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
+    manifest.update(format_version=10, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
                     monitoring="Source training block 1 in eval mode; no validation set or test-based selection")
     if previous is not None:
         manifest["created_utc"] = previous["created_utc"]

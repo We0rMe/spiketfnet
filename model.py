@@ -53,11 +53,24 @@ class SpectralBranch(nn.Module):
         return self.embedding(flat), self.classifier(flat)
 
 
+class SplitBiasConv1d(nn.Conv1d):
+    """保留原 weight/bias 参数，避开旧 CUDA 膨胀实现的逐通道偏置填充。"""
+
+    def forward(self, x):
+        output = self._conv_forward(x, self.weight, None)
+        if self.bias is not None:
+            # 数学等价，浮点累加顺序可不同；不承诺与 native 的训练轨迹逐位相同。
+            shape = (1, -1, 1) if output.ndim == 3 else (-1, 1)
+            output = output + self.bias.view(shape)
+        return output
+
+
 class SpikingResidualBlock(nn.Module):
     def __init__(self, cfg, dilation):
         super().__init__()
         width = cfg.temporal_width
-        self.dilated = nn.Sequential(nn.Conv1d(width, width, cfg.residual_kernel,
+        conv = SplitBiasConv1d if cfg.t2_conv_execution == "split_bias" and dilation > 1 else nn.Conv1d
+        self.dilated = nn.Sequential(conv(width, width, cfg.residual_kernel,
                                                padding=dilation * (cfg.residual_kernel // 2), dilation=dilation),
                                      nn.BatchNorm1d(width), lif_node(cfg))
         self.pointwise = nn.Sequential(nn.Conv1d(width, width, 1), nn.BatchNorm1d(width), lif_node(cfg))

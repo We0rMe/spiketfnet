@@ -42,6 +42,14 @@ DETAILED_TIMING_V8_SOURCES = {
     "utils/provenance.py": "48242eab8116e5c0774182e4cf060c142f18a91a71977883416087ef99ccdf09",
 }
 
+CONV_EXECUTION_V9_SOURCES = {
+    "model.py": "4d93fe4b52ddf33ffbf8127dff145c81351dddb47a51e7e4a04d86eb402e430c",
+    "train.py": "d43318d26a22b292569c09313be1e39abd1cdf08793381c82d73ddba14da7318",
+    "evaluate.py": "f1c83eac7c55514f5b2f0ffc20f085c47a1975457268d34912ca23112d8b77ab",
+    "utils/operator_profile.py": "6008602d2e561c40cfda59c5681368154c708dc9ea4ce366d086ebf90e0af66a",
+    "utils/provenance.py": "50d3fa49dee2a620c484e5917407492a2d68f4ba459ceab4149066442af611d8",
+}
+
 MODULE_TIMING_V6_SOURCES = {
     "train.py": "35ed6c3c74f353c48e84148289d042680278671bdd29adf3f8379e3e1f619ac6",
     "evaluate.py": "515ceb814c0f8f73c623de0b02be728a27a4f06ac71846c1ca563cafb75ec300",
@@ -94,7 +102,7 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
     selection_hash = hashlib.sha256(prepared.ids.tobytes()).hexdigest()
     if manifest["selected_trial_count"] != len(prepared.ids) or manifest.get("selection_sha256", selection_hash) != selection_hash:
         raise ValueError("Resume trial selection differs")
-    # 旧版可升级训练/评估基础设施；网络和预处理代码必须完全相同。
+    # 历史升级需认证源码；旧模型仅允许进入逐位保持原路径的 native 模式。
     checked_sources = ("model.py", "data.py") if manifest.get("format_version", 1) == 1 else (
         "model.py", "data.py", "train.py", "evaluate.py")
     version = manifest.get("format_version", 1)
@@ -113,6 +121,10 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
         previous_hash = manifest["code_sha256"][name]
         current_name = LEGACY_SOURCE_PATHS.get(name, name) if version < 6 else name
         if previous_hash == code_hashes[current_name]:
+            continue
+        if version <= 9 and cfg.t2_conv_execution == "native" and (version == 9 or name == "model.py") and verified_source_upgrade(
+                name, previous_hash, details, CONV_EXECUTION_V9_SOURCES):
+            print(f"Verified v{version} native-path upgrade: {name}; original convolution execution preserved.", flush=True)
             continue
         # evaluate.py 在 v7/v8 相同，其他文件只接受各自版本的已冻结内容。
         if version in (7, 8) and (version == 8 or name == "evaluate.py") and verified_source_upgrade(

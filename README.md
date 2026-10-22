@@ -86,7 +86,7 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 结果位于 `results/ablation/<组别>/`，各组独立恢复；总表为 `results/ablation/comparison.csv`。
 单分支保留对应融合投影和最终分类头，等权组使用固定 0.5/0.5。详见 [消融运行与实现约定](docs/ABLATION.zh-CN.md)。
 
-新版清单为 v9，源码快照保留 `experiments/`、`utils/` 的目录结构。支持经归档源码摘要验证的旧 v4/v5/v6/v7/v8 四组及 v3 完整模型断点迁移；原 `model.py` 和 `data.py` 未改动，旧完整模型仍以 `python train.py` 继续。
+新版清单为 v10，源码快照保留 `experiments/`、`utils/` 的目录结构。支持经归档源码摘要验证的旧断点迁移；v9 四组已验证 native 路径继续训练。`model.py` 增加可选执行方式，旧模型仅允许恢复为 native；数据和参数键名不变，旧完整模型仍以 `python train.py` 继续。
 新消融实验不能接续其他组权重。验证说明见消融文档和 smoke_tests/results/timing_check/report.md。
 
 ## 耗时和恢复
@@ -115,7 +115,7 @@ CUDA 使用同流 Event，前向包围层调用、反向包围归属节点，epo
 
 恢复会校验数据指纹、trial 身份、模型/预处理和训练设置。可调整 N、M、起始 seed 和设备分配；学习率、batch size、epoch 总数、网络参数、确定性设置变化必须使用新实验名。窗口修改仍要求预处理指纹一致。新格式还校验训练与评估代码哈希；环境或 CPU/CUDA 后端变化不保证逐位相同，运行环境会记入恢复记录。
 
-断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2/v3/v4/v5/v6/v7/v8 源码（兼容 LF/CRLF 换行），才允许升级至 v9。旧消融模型按原名校验并映射到新路径；旧计时工具仅在固定摘要认证通过后升级。模型、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。
+断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2–v9 源码（兼容 LF/CRLF 换行），才允许升级至 v10。旧消融模型按原名校验并映射到新路径；旧计时工具仅在固定摘要认证通过后升级。native 路径的模型计算、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。执行模式改变需新建实验，不能把参数可加载误认为数值轨迹完全一致。
 
 升级步骤：先停止服务器现有训练并确认子进程退出；同步新版代码；保留原 `experiment_name`、数据路径、N/M/seed 和科学参数，保持 `resume=True`；再次运行 `python train.py`。无需重命名、搬动或删除现有结果目录。已完成任务只补充展示文件，不重新训练；未完成任务从 checkpoint 的 epoch 继续。不要在训练仍运行时单独启动 `evaluate.py`。
 
@@ -200,4 +200,12 @@ results/spiketfnet/
 
 `run_reporting_smoke.py` 使用 `smoke_tests/fixtures/` 中冻结的 v2 源码生成真实旧断点，与新版监测、实时输出及双进程恢复作对照。结果在 `smoke_tests/results/reporting_check/`。冻结源码仅供冒烟测试，不是服务器训练入口。
 
-`run_layout_smoke.py` 默认验证修改前 v8 四组真实断点升级到 v9 的训练轨迹、逐层/逐步计时、算子采样、历史、汇总及源码归档，结果在 smoke_tests/results/t2_detail_check/。可从 Python 调用 main(output_name="新目录", version=5/6/7) 检查更早版本。run_ablation_smoke.py 覆盖四组双进程调度与 v3 恢复，run_timing_smoke.py 覆盖 v4 恢复。全部为 CPU 小样本测试，不能代替服务器 GPU 性能测量。
+`run_layout_smoke.py` 默认验证修改前 v9 四组断点升级到 v10 native 的训练轨迹、细粒度计时、历史、汇总及源码归档，结果在 smoke_tests/results/conv_execution_check/。可从 Python 调用 main(output_name="新目录", version=5/6/7/8) 检查更早版本。run_ablation_smoke.py 覆盖四组双进程调度与 v3 恢复，run_timing_smoke.py 覆盖 v4 恢复。全部为 CPU 小样本测试，不能代替服务器 GPU 性能测量。
+
+## 膨胀卷积性能改善（可选）
+
+服务器日志已确认 PyTorch 2.5.1 确定性膨胀卷积走慢速实现，d=2/4 前向有大量逐通道 bias 拷贝。`config.py` 的 `t2_conv_execution="native"` 默认保持旧计算路径；`"split_bias"` 保留偏置参数但改为卷积后一次广播加法，仅应用于 T2 的 d>1 卷积。参数键名/数量和数学定义保持不变，但浮点累加顺序可能改变，不能保证旧训练轨迹逐位一致。
+
+先在空闲 GPU 运行 `python smoke_tests/run_conv_benchmark.py`（设备在脚本顶部 DEVICE 修改），检查输出/梯度误差和实际收益；结果仅写 `smoke_tests/results/conv_benchmark/report.json`。计时与 profiler 分开，CPU 运行只验证流程。无需重新安装 requirements.txt。
+
+当前实验继续用 native 和原目录恢复。尝试 split_bias 正式训练时，普通实验更换 `experiment_name`，消融批次更换 `ABLATION_ROOT`，并将所有实验组统一配置；恢复校验拒绝同一实验中切换执行模式。split_bias 的同模式续训照常支持。详见 [服务器证据、方案与边界](docs/TEMPORAL2_TIMING_AUDIT.zh-CN.md)。

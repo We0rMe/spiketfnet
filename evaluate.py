@@ -15,6 +15,7 @@ from config import CONFIG, PROJECT_ROOT, Config
 from data import WindowDataset, file_sha256, prepare_data
 from experiments.variants import build_model
 from utils.timing import normalize_history, timing_markdown, timing_rows, timing_totals
+from utils.provenance import CONV_EXECUTION_V9_SOURCES, verified_source_upgrade
 
 
 def write_text(path, text):
@@ -349,7 +350,11 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
     if device_name is not None:
         cfg = replace(cfg, evaluation_device=device_name)
     if file_sha256(Path(__file__).with_name("model.py")) != manifest["code_sha256"]["model.py"]:
-        raise ValueError("Model source changed; use the archived source to replay this experiment")
+        known_native = (manifest.get("format_version", 1) <= 9 and cfg.t2_conv_execution == "native"
+                        and verified_source_upgrade("model.py", manifest["code_sha256"]["model.py"],
+                                                    root / "details", CONV_EXECUTION_V9_SOURCES))
+        if not known_native:
+            raise ValueError("Model source changed; use the archived source to replay this experiment")
     variant_key = "experiments/variants.py" if manifest.get("format_version", 1) >= 6 else "ablation_model.py"
     if manifest.get("format_version", 1) >= 4 and file_sha256(
             PROJECT_ROOT / "experiments/variants.py") != manifest["code_sha256"][variant_key]:

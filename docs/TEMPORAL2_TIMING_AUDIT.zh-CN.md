@@ -1,6 +1,41 @@
 # 第二时域模块计时与性能排查
 
-本轮仅增加诊断计时、调整输出和断点兼容规则。model.py、数据、优化器、单步执行方式、数值精度、确定性配置和依赖版本均未改动。没有启用 CuPy、多步改写、kernel 融合、torch.compile 或 AMP。
+本文保留历次诊断记录。最新 v10 增加可选的偏置外置执行方式，默认 native 不变；未启用 CuPy、多步改写、torch.compile、AMP 或更换依赖。
+
+## 2026-10-22 服务器日志确认与改善（v10）
+
+证据为用户提供的 `日志信息.txt`：S32、1000 ms、seed=42，从 epoch 19 恢复，包含 epoch 20 的单 batch profiler 及 epoch 21/22。实际环境为 torch 2.5.1+cu121、cuDNN 90100、RTX 4090 D；全局及 cuDNN 确定性均开启，benchmark 关闭。主进程显示仅使用 cuda:1，已完成 31 折，尚有 4 个任务，不是这一进程同时使用两张 GPU。
+
+### 已确认的问题
+
+1. d=1 的卷积和三个逐点卷积使用 `aten::cudnn_convolution`；d=2/4 的两层确实使用 `aten::slow_conv_dilated2d`。后端回退已从推断变为实际采样证据。
+2. 每层 d>1 卷积的一个 batch、四个仿真步中，`copy_` 32,768 次、`fill_` 32,784 次、`select` 66,560 次。其中 `128×64×4=32,768` 与逐样本逐输出通道偏置填充精确对应；两层完整 epoch 约 4,177,920 次该类 copy。它们是算子调用计数，不是实测 CUDA kernel 数。
+3. 非采样 epoch 21 中，两层前向合计 22.052297 s，占六个卷积前向合计 22.094725 s 的约 99.81%；d=1 前向只有 0.015078 s。四个仿真步持续慢，排除仅首次初始化造成主要瓶颈。epoch 20 叠加采样和恢复后预热，不作为正常速度基准。
+4. Profiler 返回 CPU 操作但没有关联到 T2 的 CUDA kernel。`kernels=NA` 不代表耗时为零；层级 CUDA Event 是独立测量，仍然有效。尚不能精确分解偏置拷贝的 GPU 忙碌时间与主机提交间隙，也不能断言所有 22 秒都来自偏置。v10 记录支持/请求的 profiler activities、CPU/CUDA 事件数、全局/T2 关联 kernel 数，以区分未采到 CUDA 与归属信息缺失。若 CUDA activity 已请求但事件为空，再结合服务器 profiler 警告检查 CUPTI、运行环境或采样权限；不自动修改系统权限或安装未知组件。
+
+这属于模型的膨胀卷积与当前框架/确定性策略的性能兼容问题。Ts=4 放大调用量，但普通非脉冲网络也可能触发同一回退，不能归咎于 LIF 或门控设计。现有慢速实现仍执行目标卷积，没有证据说明原训练权重因此无效或需要废弃；原作者未公开的实现细节也不能由此反推。
+
+### 已实施的保守改善
+
+`config.py` 增加 `t2_conv_execution="native"` / `"split_bias"`。后者仅把 T2 的 d>1 层替换为 `model.SplitBiasConv1d`，仍继承 nn.Conv1d：
+
+```text
+原路径：Conv1d(x, weight, bias, dilation=d)
+可选路径：Conv1d(x, weight, None, dilation=d) + bias[None, :, None]
+```
+
+这是同一数学卷积的偏置外置，不是删除 bias，也不是将 dilation 改为 1。原参数对象名称、尺寸、参数量、初始化顺序、padding、LIF/BN、损失、LOSO、batch、Ts 和确定性保持不变。此版本的无偏置慢速前向会统一清零输出，再逐样本执行 im2col/GEMM；避免逐通道复制，偏置梯度也交给广播加法的归约。它仍可能走 slow_conv，故不承诺解决全部卷积开销或具体加速倍数。
+
+实数域等价不等于 FP32 逐位相同：原 GEMM 累加到已有 bias，新路径在卷积求和后加 bias，梯度归约顺序也可能不同。SNN 阈值附近可能放大这种微小差异，因此不能保证最终 ACC 或训练轨迹与 native 完全相同。CPU 双精度输出/输入梯度/权重梯度/偏置梯度检查通过，只证明实现的数学一致性；真实 GPU 误差和速度仍需测量。
+
+### 计划、运行和断点边界
+
+1. 当前已完成 31 折的实验保留 `native`，保持其名称/路径后照常续训。认证 v9 的原 model/train/provenance/operator_profile 源码后，允许升级 v10；旧版 native 模型计算与新版 native 的权重、梯度、RNG 逐位对照验证。旧源码认证仍要求固定摘要，未知修改不放行。
+2. 在空闲 GPU 运行 `python smoke_tests/run_conv_benchmark.py`；脚本顶部可设 DEVICE 为 cuda:0 或 cuda:1。用实际宽度、d=2/4、Ts、500/1000 ms、batch=128 的合成脉冲输入，比较输出/三类梯度，再预热和计时。Profiler 在测速之后单独执行。只写 `smoke_tests/results/conv_benchmark/report.json`，不读取或修改正式实验。CPU 自动采用 batch=2，仅作正确性冒烟，不能用 CPU 加速比判断 CUDA 收益。
+3. GPU 检查通过且实测有收益后，新实验设 `t2_conv_execution="split_bias"`。普通训练须换 `experiment_name`（如 spiketfnet_split_bias）；消融批次须另设 `ABLATION_ROOT`（如 CONFIG.output_root / "ablation_split_bias"）。所有组使用相同执行配置，保持其余参数一致。两模式权重键名兼容，但同一正式实验中切换模式会被拒绝，防止 31 折旧路径与 4 折新路径混合。split_bias 自身的中断恢复正常支持。
+4. 之后再评估包含确定性膨胀卷积 cuDNN 修复的 PyTorch 版本，并建立独立环境对照；不在当前训练环境直接升级。上游 #154292 提供相关依据，但具体安装版本、驱动及 SpikingJelly 兼容性必须实际验证。关闭确定性或去掉模型 bias 均不作为这次默认方案。
+
+本轮未更改 requirements.txt：改动只使用现有 PyTorch API；不能在没有服务器验证的情况下把依赖升级当成已验证修复。新的执行选择与模型参数一起归档，普通和消融模型共用，不复制训练脚本。
 
 ## 22.114 s 前向 / 3.339 s 反向：v9 深入排查
 

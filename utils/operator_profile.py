@@ -29,6 +29,8 @@ def runtime_settings(device):
         "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
         "float32_matmul_precision": torch.get_float32_matmul_precision(),
         "cpu_threads": torch.get_num_threads(),
+        "profiler_kineto_available": torch.profiler.kineto_available(),
+        "profiler_supported_activities": sorted(str(value) for value in torch.profiler.supported_activities()),
         "environment": {name: os.environ.get(name) for name in (
             "CUDA_VISIBLE_DEVICES", "CUDA_LAUNCH_BLOCKING", "CUBLAS_WORKSPACE_CONFIG",
             "TORCH_CUDNN_V8_API_DISABLED", "NVIDIA_TF32_OVERRIDE")},
@@ -37,6 +39,7 @@ def runtime_settings(device):
 
 def summarize_events(events, device_type):
     """按最近的 T2 标记归属；CPU self 与直接关联 kernel 各累计一次。"""
+    events = list(events)
     operators, kernels = {}, {}
     owners = {}
 
@@ -72,10 +75,18 @@ def summarize_events(events, device_type):
             item["calls"] += 1
             item["kernel_seconds"] += seconds
     observed = bool(kernels)
+    coverage = {
+        "cpu_events": sum(event.device_type == torch.autograd.DeviceType.CPU for event in events),
+        "cuda_events": sum(event.device_type == torch.autograd.DeviceType.CUDA for event in events),
+        "linked_kernels_all_scopes": sum(len(event.kernels) for event in events
+                                         if event.device_type == torch.autograd.DeviceType.CPU),
+        "linked_kernels_t2": sum(row["calls"] for row in kernels.values()),
+    }
     if not observed:
         for row in operators.values():
             row["kernel_seconds"] = None
     return {"operators": list(operators.values()), "kernels": list(kernels.values()),
+            "coverage": coverage,
             "cuda_kernels_observed": observed,
             "note": ("Self CPU and linked CUDA kernels; parent inclusive times are not added."
                      if observed else "CUDA kernel timing unavailable; CPU operator times only."
@@ -87,11 +98,13 @@ class OperatorSample:
         self.device, self.batch = device, batch
         self.profiler = None
         self.result = None
+        self.activities = []
 
     def start(self):
         activities = [torch.profiler.ProfilerActivity.CPU]
         if self.device.type == "cuda" and torch.profiler.ProfilerActivity.CUDA in torch.profiler.supported_activities():
             activities.append(torch.profiler.ProfilerActivity.CUDA)
+        self.activities = [str(value) for value in activities]
         try:
             self.profiler = torch.profiler.profile(activities=activities, record_shapes=False,
                                                   profile_memory=False, with_stack=False)
@@ -112,7 +125,8 @@ class OperatorSample:
             return
         try:
             self.profiler.stop()
-            self.result = {"batch": self.batch, **summarize_events(self.profiler.events(), self.device.type)}
+            self.result = {"batch": self.batch, "requested_activities": self.activities,
+                           **summarize_events(self.profiler.events(), self.device.type)}
         except Exception as exc:
             self.result = {"batch": self.batch, "error": f"Profiler collection failed: {type(exc).__name__}: {exc}"}
         finally:
@@ -126,6 +140,12 @@ def sample_log(sample):
     if "error" in sample:
         return lines + [sample["error"]]
     lines.append(f"T2 SAMPLE {sample['note']}")
+    if "coverage" in sample:
+        lines.append(f"T2 PROFILER activities={sample.get('requested_activities')} coverage={sample['coverage']}")
+        if not sample["cuda_kernels_observed"] and "CUDA" in str(sample.get("requested_activities")):
+            lines.append("T2 PROFILER CUDA requested but no T2 kernels linked; inspect CUDA event/"
+                         "global link counts and profiler warnings (CUPTI/runtime permissions). "
+                         "Layer CUDA Event timings remain separate measurements.")
     grouped = defaultdict(list)
     for row in sample["operators"]:
         if row["operator"].startswith(("aten::", "prim::", "cuda")):

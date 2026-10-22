@@ -1,4 +1,4 @@
-"""真实 v5-v8 四组断点迁移；检查第二模块细粒度计时与训练轨迹。"""
+"""真实 v5-v9 四组断点迁移；检查 native 路径、细粒度计时与训练轨迹。"""
 
 import io
 import csv
@@ -30,9 +30,9 @@ from utils.timing import PARTS, TIME_KEYS, timing_totals
 import train
 
 
-def main(output_name="t2_detail_check", version=8):
-    if version not in (5, 6, 7, 8):
-        raise ValueError("This smoke supports v5/v6/v7/v8 fixtures")
+def main(output_name="conv_execution_check", version=9):
+    if version not in (5, 6, 7, 8, 9):
+        raise ValueError("This smoke supports v5/v6/v7/v8/v9 fixtures")
     base = ROOT / "smoke_tests/results" / output_name
     base.mkdir(parents=True, exist_ok=False)
     os.environ["MPLCONFIGDIR"] = str(base / "plot_cache")
@@ -51,6 +51,8 @@ def main(output_name="t2_detail_check", version=8):
         "train.py", "evaluate.py", "config.py", "model.py", "data.py", "requirements.txt", *LEGACY_SOURCE_PATHS)
     for name in names:
         original = ROOT / LEGACY_SOURCE_PATHS.get(name, name)
+        if name == "model.py":
+            original = fixtures / "v9/model.py"
         if version >= 6 and (fixtures / f"v{version}" / name).is_file():
             original = fixtures / f"v{version}" / name
         elif version == 5 and name in ("train.py", "evaluate.py"):
@@ -60,7 +62,8 @@ def main(output_name="t2_detail_check", version=8):
         (source / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(original, source / name)
     helpers = fixtures / (f"v{version}" if version >= 7 else "v6")
-    old_timing = load_module("frozen_timing", helpers / "utils/timing.py")
+    timing_source = helpers / "utils/timing.py"
+    old_timing = load_module("frozen_timing", timing_source if timing_source.exists() else ROOT / "utils/timing.py")
     old_provenance = load_module("frozen_provenance", helpers / "utils/provenance.py")
     with patch.dict(sys.modules, {"training_timing": old_timing, "utils.timing": old_timing,
                                  "utils.provenance": old_provenance}):
@@ -115,7 +118,10 @@ def main(output_name="t2_detail_check", version=8):
                 assert item["recorded_epochs"] == (2 if version >= 8 else 1)
                 assert item["recorded_trials"] == (32 if version >= 8 else 16)
                 assert (item["total_seconds"] is not None) == (version >= 8)
-        assert "_t2_diagnostics" not in after[0]
+        if version < 9 or variant == "spectral_only":
+            assert "_t2_diagnostics" not in after[0]
+        else:
+            assert after[0]["_t2_diagnostics"] == before[0]["_t2_diagnostics"]
         if variant != "spectral_only":
             assert after[1]["_t2_diagnostics"]["sample"]["operators"]
             assert len(after[1]["_t2_diagnostics"]["layers"]) == 12
@@ -129,7 +135,7 @@ def main(output_name="t2_detail_check", version=8):
         reevaluate_experiment(root, selected, device_name="cpu")
         compare_runs(reference, root, cfg)
         manifest = json.loads((root / "details/experiment.json").read_text(encoding="utf-8"))
-        assert manifest["format_version"] == 9
+        assert manifest["format_version"] == 10
         archive = root / "details/source_resume"
         for name in SOURCE_NAMES:
             assert (archive / name).read_bytes() == (ROOT / name).read_bytes(), name
@@ -159,7 +165,7 @@ def main(output_name="t2_detail_check", version=8):
               f"Final weights, loss/ACC, monitor metrics and evaluation arrays match uninterrupted v{version} exactly.\n"
               "Existing v8 operator times preserved; unavailable older timing/detail is not invented.\n"
               "Layer/step/backward-node timing, one-batch CPU profiling, per-trial means and totals verified.\n"
-              "Legacy and migrated v9 reevaluation passed; completed jobs skipped, source archives import separately.\n"
+              "Legacy and migrated v10 reevaluation passed; completed jobs skipped, source archives import separately.\n"
               "Unknown code changes and modified new helper modules are rejected by resume checks.\n"
               "CPU smoke only; no formal 35-fold or GPU training was run.\n")
     (base / "report.md").write_text(report, encoding="utf-8")

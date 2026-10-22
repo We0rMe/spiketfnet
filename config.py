@@ -73,6 +73,7 @@ class Config:
     num_workers: int = 0  # 可调 DataLoader 进程数；Windows 安全默认
     cpu_threads: int = 4  # CPU 运算线程数
     deterministic: bool = True  # 尽量启用确定性运算，不进行测试集调参
+    t2_conv_execution: str = "native"  # native 保持旧轨迹；split_bias 将 d>1 卷积偏置外置，需新实验目录
     check_gradients: bool = False  # 调试开关：逐 batch 扫描全部梯度；正式训练关闭以减少开销
     time_branches: bool = True  # T2 卷积/LIF 前后向总计、逐层、逐仿真步诊断；有插桩开销
     t2_profile_batch: int = 2  # 首个新 epoch 采样第几个训练 batch 的底层算子；每次启动/续训一次，0 关闭采样
@@ -146,6 +147,8 @@ class Config:
             raise ValueError("monitor_every must be nonnegative; plot_every must be positive integers")
         if type(self.t2_profile_batch) is not int or self.t2_profile_batch < 0:
             raise ValueError("t2_profile_batch must be a nonnegative integer")
+        if self.t2_conv_execution not in ("native", "split_bias"):
+            raise ValueError("t2_conv_execution must be native or split_bias")
         for name in (self.device, self.evaluation_device):
             if name not in ("auto", "cpu", "cuda") and not (
                     isinstance(name, str) and name.startswith("cuda:") and name[5:].isdigit()):
@@ -180,7 +183,8 @@ class Config:
     @classmethod
     def from_dict(cls, values):
         defaults = cls()
-        restored = {}
+        # v9 及更早归档没有此字段，不能继承后来手动改过的运行默认值。
+        restored = {"t2_conv_execution": values.get("t2_conv_execution", "native")}
         for key, value in values.items():
             original = getattr(defaults, key)
             restored[key] = Path(value) if isinstance(original, Path) else tuple(value) if isinstance(original, tuple) else value
