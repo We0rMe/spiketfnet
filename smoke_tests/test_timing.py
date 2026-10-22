@@ -17,7 +17,9 @@ from experiments.variants import build_model
 from config import CONFIG, PROJECT_ROOT
 from data import PreparedData
 from train import seed_everything, train_epoch
-from utils.timing import BranchTimer, PARTS, TIME_KEYS, normalize_history, timing_log, timing_totals
+from utils.timing import (BranchTimer, PARTS, TIME_KEYS, normalize_history, timing_log, timing_totals,
+                          detailed_timing_log)
+from utils.operator_profile import summarize_events, sample_log
 
 
 class Tick(torch.autograd.Function):
@@ -89,12 +91,13 @@ class TimingTests(unittest.TestCase):
             seed_everything(42, cfg)
             data = TensorDataset(torch.randn(3, 9, 125), torch.randn(3, 9, 560), torch.tensor([0, 1, 2]))
             states, gradients, rngs, rows = [], [], [], []
-            for enabled in (False, True):
+            for enabled, profile_batch in ((False, 0), (True, 0), (True, 2)):
                 seed_everything(15, cfg)
                 model = build_model(cfg)
                 optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
                 loader = DataLoader(data, batch_size=2, generator=torch.Generator().manual_seed(42))
-                rows.append(train_epoch(model, loader, optimizer, replace(cfg, time_branches=enabled), torch.device("cpu")))
+                rows.append(train_epoch(model, loader, optimizer, replace(cfg, time_branches=enabled),
+                                        torch.device("cpu"), profile_batch=profile_batch))
                 states.append({key: value.clone() for key, value in model.state_dict().items()})
                 gradients.append({key: value.grad.clone() for key, value in model.named_parameters()})
                 rngs.append(torch.get_rng_state())
@@ -103,6 +106,11 @@ class TimingTests(unittest.TestCase):
                 for key in a:
                     torch.testing.assert_close(a[key], b[key], rtol=0, atol=0)
             torch.testing.assert_close(rngs[0], rngs[1], rtol=0, atol=0)
+            for key in states[0]:
+                torch.testing.assert_close(states[0][key], states[2][key], rtol=0, atol=0)
+            for key in gradients[0]:
+                torch.testing.assert_close(gradients[0][key], gradients[2][key], rtol=0, atol=0)
+            torch.testing.assert_close(rngs[0], rngs[2], rtol=0, atol=0)
             for key in ("loss", "train_acc_percent"):
                 self.assertEqual(rows[0][key], rows[1][key])
             self.assertEqual(rows[1]["train_trials"], 3)  # 包括末尾不足一个 batch 的样本。
@@ -113,6 +121,26 @@ class TimingTests(unittest.TestCase):
                     self.assertEqual(rows[1][key], 0)
                 else:
                     self.assertGreater(rows[1][key], 0)
+            details = rows[2]["_t2_diagnostics"]
+            if variant == "spectral_only":
+                self.assertIsNone(details)
+            else:
+                self.assertEqual(len(details["layers"]), 12)
+                self.assertEqual({r["batch_size"] for r in details["records"]}, {1, 2})
+                self.assertEqual({r["step"] for r in details["records"] if r["phase"] == "forward"}, {1, 2, 3, 4})
+                self.assertTrue(details["sample"]["operators"])
+                self.assertEqual(details["sample"]["batch"], 2)
+                self.assertFalse(details["sample"]["cuda_kernels_observed"])
+                self.assertTrue(all(r["step"] == 0 for r in details["records"] if r["node"].endswith("AccumulateGrad")))
+                for kind in ("conv", "lif"):
+                    for phase in ("forward", "backward"):
+                        self.assertAlmostEqual(sum(r["seconds"] for r in details["records"]
+                                                   if r["phase"] == phase and details["layers"][r["layer"]]["kind"] == kind),
+                                               rows[2][f"temporal2_{kind}_{phase}_seconds"])
+                self.assertEqual(sum(r["calls"] for r in details["records"] if r["phase"] == "forward"), 96)
+                lines = detailed_timing_log(details)
+                self.assertTrue(any("Fstep=" in line for line in lines))
+                self.assertFalse(any("/trial" in line for line in lines))
 
     def check_operator_times(self, device, clock):
         model = nn.Module()
@@ -200,3 +228,38 @@ class TimingTests(unittest.TestCase):
                 self.assertEqual(cfg.model_variant, "full")
             with self.assertRaises(ValueError):
                 run_ablation(cfg, "spectral_only", data, purpose="smoke")
+
+    def test_profile_uses_nearest_marker_and_only_direct_kernel_times(self):
+        from types import SimpleNamespace
+        cpu = torch.autograd.DeviceType.CPU
+        def event(index, name, parent=None, kernels=(), self_cpu=1):
+            return SimpleNamespace(id=index, name=name, cpu_parent=parent, device_type=cpu,
+                                   kernels=kernels, self_cpu_time_total=self_cpu)
+        marker = event(1, "T2::1.dilated.0::forward::step=2::forward")
+        parent = event(2, "aten::conv1d", marker, self_cpu=2)
+        child = event(3, "aten::copy_", parent, [SimpleNamespace(name="copy_kernel", duration=7)], self_cpu=3)
+        outside = event(4, "aten::loss", kernels=[SimpleNamespace(name="loss_kernel", duration=1000)])
+        summary = summarize_events([marker, parent, child, outside], "cuda")
+        self.assertEqual(len(summary["operators"]), 2)
+        self.assertAlmostEqual(sum(row["kernel_seconds"] for row in summary["operators"]), 7e-6)
+        self.assertEqual(summary["kernels"][0]["layer"], "1.dilated.0")
+        self.assertEqual(summary["kernels"][0]["calls"], 1)
+        lines = sample_log({"batch": 2, **summary})
+        self.assertTrue(any("aten::copy_" in line for line in lines))
+        self.assertTrue(any("copy_kernel" in line for line in lines))
+        self.assertFalse(any("loss_kernel" in line for line in lines))
+
+    def test_detail_archive_survives_csv_read_and_checkpoint_normalization(self):
+        from train import write_history
+        from evaluate import read_history
+        base = PROJECT_ROOT / "smoke_tests/results"
+        base.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as temp:
+            path = Path(temp) / "history.csv"
+            row = {"epoch": 2, "train_trials": 3, "_t2_diagnostics": {"schema": 1, "records": []}}
+            write_history(path, [row])
+            self.assertNotIn("_t2_diagnostics", path.read_text())
+            self.assertNotIn("_t2_diagnostics", read_history(path)[0])
+            self.assertEqual(read_history(path, include_diagnostics=True)[0]["_t2_diagnostics"], row["_t2_diagnostics"])
+            write_history(path, read_history(path))
+            self.assertEqual(read_history(path, include_diagnostics=True)[0]["_t2_diagnostics"], row["_t2_diagnostics"])

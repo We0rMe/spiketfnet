@@ -1,4 +1,4 @@
-"""真实 v5/v6/v7 四组断点迁移；检查第二模块算子计时与训练轨迹。"""
+"""真实 v5-v8 四组断点迁移；检查第二模块细粒度计时与训练轨迹。"""
 
 import io
 import csv
@@ -30,9 +30,9 @@ from utils.timing import PARTS, TIME_KEYS, timing_totals
 import train
 
 
-def main(output_name="t2_operator_check", version=7):
-    if version not in (5, 6, 7):
-        raise ValueError("This smoke supports v5/v6/v7 fixtures")
+def main(output_name="t2_detail_check", version=8):
+    if version not in (5, 6, 7, 8):
+        raise ValueError("This smoke supports v5/v6/v7/v8 fixtures")
     base = ROOT / "smoke_tests/results" / output_name
     base.mkdir(parents=True, exist_ok=False)
     os.environ["MPLCONFIGDIR"] = str(base / "plot_cache")
@@ -59,7 +59,7 @@ def main(output_name="t2_operator_check", version=7):
             original = fixtures / "v6/utils/timing.py"
         (source / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(original, source / name)
-    helpers = fixtures / ("v7" if version == 7 else "v6")
+    helpers = fixtures / (f"v{version}" if version >= 7 else "v6")
     old_timing = load_module("frozen_timing", helpers / "utils/timing.py")
     old_provenance = load_module("frozen_provenance", helpers / "utils/provenance.py")
     with patch.dict(sys.modules, {"training_timing": old_timing, "utils.timing": old_timing,
@@ -97,13 +97,13 @@ def main(output_name="t2_operator_check", version=7):
         folder = run_path(root, 500, 1, cfg.seed)
         before = torch.load(folder / "details/resume.pt", weights_only=True, map_location="cpu")["history"]
         train.run_experiment(group, selected, purpose="smoke")
-        after = read_history(folder / "details/history.csv")
+        after = read_history(folder / "details/history.csv", include_diagnostics=True)
         for key in ("epoch", "loss", "train_acc_percent"):
             assert before[0][key] == after[0][key], "Retained history changed"
         assert after[0]["train_trials"] == 16
         for key in TIME_KEYS:
             absent = variant == "spectral_only"
-            assert after[0][key] is None
+            assert after[0][key] == before[0][key] if version >= 8 else after[0][key] is None
             assert after[1][key] == 0 if absent else after[1][key] > 0
             assert after[1][key + "_per_trial"] == after[1][key] / 16
         totals = timing_totals([(variant, after)], 2)
@@ -112,8 +112,13 @@ def main(output_name="t2_operator_check", version=7):
             if variant == "spectral_only":
                 assert item["total_seconds"] == 0
             else:
-                assert item["total_seconds"] is None and item["recorded_epochs"] == 1
-                assert item["recorded_trials"] == 16
+                assert item["recorded_epochs"] == (2 if version >= 8 else 1)
+                assert item["recorded_trials"] == (32 if version >= 8 else 16)
+                assert (item["total_seconds"] is not None) == (version >= 8)
+        assert "_t2_diagnostics" not in after[0]
+        if variant != "spectral_only":
+            assert after[1]["_t2_diagnostics"]["sample"]["operators"]
+            assert len(after[1]["_t2_diagnostics"]["layers"]) == 12
         header = (folder / "details/history.csv").read_text(encoding="utf-8").splitlines()[0]
         assert "temporal_train_seconds" not in header and "monitor_seconds" not in header
         log = (folder / "training.log").read_text(encoding="utf-8")
@@ -124,7 +129,7 @@ def main(output_name="t2_operator_check", version=7):
         reevaluate_experiment(root, selected, device_name="cpu")
         compare_runs(reference, root, cfg)
         manifest = json.loads((root / "details/experiment.json").read_text(encoding="utf-8"))
-        assert manifest["format_version"] == 8
+        assert manifest["format_version"] == 9
         archive = root / "details/source_resume"
         for name in SOURCE_NAMES:
             assert (archive / name).read_bytes() == (ROOT / name).read_bytes(), name
@@ -152,9 +157,9 @@ def main(output_name="t2_operator_check", version=7):
               "Real Benchmark S1-S3, 8 trials/subject, S1 held out, seed 42, 500 ms, 2 epochs.\n"
               f"All four genuine v{version} epoch-1 checkpoints resumed with T2 Conv/LIF forward/backward timing enabled.\n"
               f"Final weights, loss/ACC, monitor metrics and evaluation arrays match uninterrupted v{version} exactly.\n"
-              "Old per-operator times remain unknown; completed tasks skipped, numerical history preserved.\n"
-              "Epoch log and CSV show only four diagnostic timings; per-trial means, coverage and cross-group totals verified.\n"
-              "Direct legacy and migrated v8 reevaluation passed; source archives import in a separate process.\n"
+              "Existing v8 operator times preserved; unavailable older timing/detail is not invented.\n"
+              "Layer/step/backward-node timing, one-batch CPU profiling, per-trial means and totals verified.\n"
+              "Legacy and migrated v9 reevaluation passed; completed jobs skipped, source archives import separately.\n"
               "Unknown code changes and modified new helper modules are rejected by resume checks.\n"
               "CPU smoke only; no formal 35-fold or GPU training was run.\n")
     (base / "report.md").write_text(report, encoding="utf-8")

@@ -9,7 +9,7 @@ from data import file_sha256
 SOURCE_NAMES = (
     "config.py", "data.py", "model.py", "train.py", "evaluate.py", "requirements.txt",
     "experiments/__init__.py", "experiments/ablation.py", "experiments/variants.py",
-    "utils/__init__.py", "utils/timing.py", "utils/provenance.py",
+    "utils/__init__.py", "utils/timing.py", "utils/provenance.py", "utils/operator_profile.py",
 )
 
 LEGACY_SOURCE_PATHS = {
@@ -33,6 +33,13 @@ DIAGNOSTIC_V7_SOURCES = {
     "train.py": "2324625648995eec73635e72d2effab1b6e224c5f1da23169ae962882c0a37bc",
     "utils/timing.py": "41b340edd8f7f70091794ee816936f1ac7aed38093f910a8ac9dec676b2b6622",
     "utils/provenance.py": "04024bb5e03db3d48c265049f01f652d9ebda8a5fb0886a0c085385f7b2e67bd",
+}
+
+DETAILED_TIMING_V8_SOURCES = {
+    "train.py": "38a412ff2bd52d6435c043d88f50575041c5d7e0e22091ee38a3795493b44348",
+    "evaluate.py": "48ed758d879bfd34999f3da8326599c80248117809d6b8de17a1f6a8e55c450f",
+    "utils/timing.py": "67d42dba38ae28db22e11a1b0bdaed74e6c30fd57f24a7654a3d04622f4a655d",
+    "utils/provenance.py": "48242eab8116e5c0774182e4cf060c142f18a91a71977883416087ef99ccdf09",
 }
 
 MODULE_TIMING_V6_SOURCES = {
@@ -77,7 +84,8 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
     previous = Config.from_dict(manifest["config"]).to_dict()
     allowed = {"N", "M", "seed", "windows_ms", "device", "gpu_ids", "evaluation_device", "num_workers",
                "cpu_threads", "data_root", "cache_root", "output_root", "experiment_name",
-               "resume", "check_gradients", "variance_ddof", "monitor_every", "plot_every", "time_branches"}
+               "resume", "check_gradients", "variance_ddof", "monitor_every", "plot_every", "time_branches",
+               "t2_profile_batch"}
     differences = [key for key, value in cfg.to_dict().items() if key not in allowed and previous[key] != value]
     if differences:
         raise ValueError(f"Resume would change training/model settings: {differences}; use a new experiment_name")
@@ -90,6 +98,8 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
     checked_sources = ("model.py", "data.py") if manifest.get("format_version", 1) == 1 else (
         "model.py", "data.py", "train.py", "evaluate.py")
     version = manifest.get("format_version", 1)
+    if version >= 9:
+        checked_sources += ("utils/operator_profile.py",)
     if version >= 6:
         checked_sources += ("experiments/variants.py", "experiments/__init__.py",
                             "utils/timing.py", "utils/provenance.py", "utils/__init__.py")
@@ -103,6 +113,11 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
         previous_hash = manifest["code_sha256"][name]
         current_name = LEGACY_SOURCE_PATHS.get(name, name) if version < 6 else name
         if previous_hash == code_hashes[current_name]:
+            continue
+        # evaluate.py 在 v7/v8 相同，其他文件只接受各自版本的已冻结内容。
+        if version in (7, 8) and (version == 8 or name == "evaluate.py") and verified_source_upgrade(
+                name, previous_hash, details, DETAILED_TIMING_V8_SOURCES):
+            print(f"Verified v{version} fine-grained timing upgrade: {name}; training semantics preserved.", flush=True)
             continue
         if manifest.get("format_version") == 2 and verified_reporting_upgrade(name, previous_hash, details):
             print(f"Verified reporting-only v2 upgrade: {name}; training semantics preserved.", flush=True)

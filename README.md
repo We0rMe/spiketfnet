@@ -14,6 +14,7 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 | `experiments/ablation.py` | 消融批次入口、组间汇总；复用根目录的训练与评估流程 |
 | `experiments/variants.py` | 原始模型与消融组的构建、各组损失；复用 `model.py` 中的分支 |
 | `utils/timing.py` | 分支计时与耗时统计 |
+| `utils/operator_profile.py` | 第二模块底层算子采样、运行时配置记录 |
 | `utils/provenance.py` | 源码归档清单、历史版本认证与断点兼容校验 |
 | `docs/` | 复现计划、实现约定及消融运行说明 |
 | `smoke_tests/` | 全部冒烟脚本与结果；与正式实验隔离 |
@@ -85,12 +86,12 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 结果位于 `results/ablation/<组别>/`，各组独立恢复；总表为 `results/ablation/comparison.csv`。
 单分支保留对应融合投影和最终分类头，等权组使用固定 0.5/0.5。详见 [消融运行与实现约定](docs/ABLATION.zh-CN.md)。
 
-新版清单为 v8，源码快照保留 `experiments/`、`utils/` 的目录结构。支持经归档源码摘要验证的旧 v4/v5/v6/v7 四组及 v3 完整模型断点迁移；原 `model.py` 和 `data.py` 未改动，旧完整模型仍以 `python train.py` 继续。
+新版清单为 v9，源码快照保留 `experiments/`、`utils/` 的目录结构。支持经归档源码摘要验证的旧 v4/v5/v6/v7/v8 四组及 v3 完整模型断点迁移；原 `model.py` 和 `data.py` 未改动，旧完整模型仍以 `python train.py` 继续。
 新消融实验不能接续其他组权重。验证说明见消融文档和 smoke_tests/results/timing_check/report.md。
 
 ## 耗时和恢复
 
-当前诊断只统计第二时域模块 `temporal.blocks` 的卷积和 LIF。`time_branches=True` 开启，日志保留 loss/ACC/训练子集监测指标，时间只有四项：
+当前诊断只统计第二时域模块 `temporal.blocks` 的卷积和 LIF。`time_branches=True` 开启，日志保留 loss/ACC/训练子集监测指标，先显示四项总计：
 
 ```text
 T2 Conv Forward=...s | T2 Conv Backward=...s | T2 LIF Forward=...s | T2 LIF Backward=...s
@@ -98,9 +99,15 @@ T2 Conv Forward=...s | T2 Conv Backward=...s | T2 LIF Forward=...s | T2 LIF Back
 
 卷积包含该模块所有膨胀卷积与逐点卷积，LIF 包含全部残差块中的 LIF；累计所有仿真步和 batch。前向、反向分开统计，BN、Dropout、残差相加和其他模块暂不计时。四项之和不代表整个模块或 epoch 的总时间。日志不显示每 trial 均摊值。
 
+四项后逐层输出 `T2 LAYER`：每个残差块的膨胀/逐点 Conv 和 LIF，共 12 层；显示前后向秒数、Host 提交区间、调用/节点数、最大前向区间以及各仿真步秒数。`Bshared` 单列跨仿真步共享的参数梯度累积。层名的第一个数字从 0 开始，例如 `1.dilated.0` 为第二块的膨胀卷积。
+
+`t2_profile_batch=2` 在每次启动/续训后，每个未完成任务的首个新 epoch 采样第 2 个训练 batch（不足时取末 batch）。`T2 SAMPLE/BACKEND/KERNEL` 记录底层算子、实际卷积后端和 CUDA kernel；CUPTI/kernel 数据不可用时明确为 NA。采样会明显增加该 batch 开销，后续 epoch 只做细粒度事件计时。设为 0 可关闭重型采样，仍保留逐层计时。
+
+每轮细节集中在任务 `details/t2_diagnostics.json`，包含各层/仿真步/反向节点、batch size、首次与后续 batch 分组、是否采样及算子/kernel 汇总；不生成逐 batch 文件或大体积 trace。`training.log` 保存可读输出；`details/provenance.json` 中的 `timing_environment` 记录实际 worker 的 PyTorch/cuDNN、确定性及 TF32 设置，`model_parameters` 保存实际总量和分支/子模块参数数目（日志为 `MODEL PARAMETERS`）。
+
 沿用原有文件：training.log 实时追加，details/history.csv 保存四项 epoch 秒数、实际 trial 次数及均摊值，任务 report.md 与已有 summary.csv/comparison.csv 汇总累计时间、均摊值和覆盖率。均摊值使用所有对应 batch 实际处理的样本总数，不是单个 batch size，也不是单 trial 独立延迟。消融删除第二模块时为 0；关闭计时时现存模块为 NA。
 
-CUDA 使用同流 Event，前向包围层调用、反向包围归属节点，epoch 末同步后读数；没有逐层同步。历史 epoch 没有四项新诊断计时，保持缺失，不由旧模块总计反推。旧日志原文保留。模型、单步 torch 后端及训练数值过程保持不变。本轮只做诊断，没有实现 kernel 融合等优化。
+CUDA 使用同流 Event，前向包围层调用、反向包围归属节点，epoch 末同步后读数；没有逐层手工同步，采样 batch 的 profiler 收尾可能同步。v8 已有四项计时保留，更早版本缺失值不反推；新增细节仅从升级后的 epoch 开始。旧日志原文保留。模型、单步 torch 后端及训练数值过程保持不变，本轮只做诊断。
 
 完整的计时边界、异步/同步检查、研究依据和解释限制见 [第二模块诊断与排查](docs/TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
 
@@ -108,7 +115,7 @@ CUDA 使用同流 Event，前向包围层调用、反向包围归属节点，epo
 
 恢复会校验数据指纹、trial 身份、模型/预处理和训练设置。可调整 N、M、起始 seed 和设备分配；学习率、batch size、epoch 总数、网络参数、确定性设置变化必须使用新实验名。窗口修改仍要求预处理指纹一致。新格式还校验训练与评估代码哈希；环境或 CPU/CUDA 后端变化不保证逐位相同，运行环境会记入恢复记录。
 
-断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2/v3/v4/v5/v6/v7 源码（兼容 LF/CRLF 换行），才允许升级至 v8。旧消融模型按原名校验并映射到新路径；v5/v6 计时工具仅在固定摘要认证通过后升级。模型、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。
+断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2/v3/v4/v5/v6/v7/v8 源码（兼容 LF/CRLF 换行），才允许升级至 v9。旧消融模型按原名校验并映射到新路径；旧计时工具仅在固定摘要认证通过后升级。模型、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。
 
 升级步骤：先停止服务器现有训练并确认子进程退出；同步新版代码；保留原 `experiment_name`、数据路径、N/M/seed 和科学参数，保持 `resume=True`；再次运行 `python train.py`。无需重命名、搬动或删除现有结果目录。已完成任务只补充展示文件，不重新训练；未完成任务从 checkpoint 的 epoch 继续。不要在训练仍运行时单独启动 `evaluate.py`。
 
@@ -193,4 +200,4 @@ results/spiketfnet/
 
 `run_reporting_smoke.py` 使用 `smoke_tests/fixtures/` 中冻结的 v2 源码生成真实旧断点，与新版监测、实时输出及双进程恢复作对照。结果在 `smoke_tests/results/reporting_check/`。冻结源码仅供冒烟测试，不是服务器训练入口。
 
-`run_layout_smoke.py` 默认验证修改前 v7 四组真实断点升级到 v8 的训练轨迹、四项诊断计时、缺失历史、汇总及源码归档，结果在 smoke_tests/results/t2_operator_check/。可从 Python 调用 main(output_name="新目录", version=5/6) 检查更早版本。run_ablation_smoke.py 覆盖四组双进程调度与 v3 恢复，run_timing_smoke.py 覆盖 v4 恢复。全部为 CPU 小样本测试，不能代替服务器 GPU 性能测量。
+`run_layout_smoke.py` 默认验证修改前 v8 四组真实断点升级到 v9 的训练轨迹、逐层/逐步计时、算子采样、历史、汇总及源码归档，结果在 smoke_tests/results/t2_detail_check/。可从 Python 调用 main(output_name="新目录", version=5/6/7) 检查更早版本。run_ablation_smoke.py 覆盖四组双进程调度与 v3 恢复，run_timing_smoke.py 覆盖 v4 恢复。全部为 CPU 小样本测试，不能代替服务器 GPU 性能测量。

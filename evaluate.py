@@ -24,7 +24,8 @@ def write_text(path, text):
     temporary.replace(path)
 
 
-def read_history(path):
+def read_history(path, include_diagnostics=False):
+    """常规绘图/跨折汇总只读数值历史，避免加载所有折的细粒度诊断。"""
     if not Path(path).exists():
         return []
     with Path(path).open(newline="", encoding="utf-8") as handle:
@@ -32,6 +33,12 @@ def read_history(path):
                  for key, value in row.items()} for row in csv.DictReader(handle)]
     provenance = Path(path).parent / "provenance.json"
     count = json.loads(provenance.read_text(encoding="utf-8")).get("training_trials") if provenance.exists() else None
+    detail_path = Path(path).with_name("t2_diagnostics.json")
+    if include_diagnostics and detail_path.exists():
+        diagnostics = json.loads(detail_path.read_text(encoding="utf-8"))
+        for row in rows:
+            if str(row["epoch"]) in diagnostics:
+                row["_t2_diagnostics"] = diagnostics[str(row["epoch"])]
     return normalize_history(rows, count)
 
 
@@ -110,6 +117,10 @@ def write_run_report(folder, cfg, history, provenance):
                   f"| ITR bits/min | {metrics['itr_bits_per_minute']:.4f} |",
                   "", "![测试混淆矩阵](confusion.png)"]
     lines += timing_markdown(timing_totals([(cfg.model_variant, history)], cfg.epochs))
+    if (Path(folder) / "details/t2_diagnostics.json").is_file():
+        lines += ["", "[T2 逐层/逐步及底层算子诊断](details/t2_diagnostics.json)。",
+                  "逐层计时覆盖升级后的 epoch；底层算子只采样每次启动/续训后首个新 epoch 的一个 batch。",
+                  "含 profiler 采样的 epoch 有额外开销，不能直接作为未插桩性能基准。"]
     lines += ["", "训练集监测使用源训练被试的第一个 block，**不是独立验证集**，不能用于判断跨被试泛化。",
               "不按监测值早停或选模型。留出被试只在固定最后一轮之后测试。",
               f"监测间隔：{cfg.monitor_every}（0 为关闭）；历史中有监测值的 epoch：{len(monitored)}。",

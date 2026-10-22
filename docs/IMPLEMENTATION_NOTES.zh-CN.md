@@ -49,7 +49,7 @@ SpikingJelly 的输入衰减和硬重置语义依据其 [LIFNode 文档](https:/
 
 预处理只做每个 trial 独立的固定变换；没有全数据标准化、目标自适应、目标 BN 更新或重叠滑窗。缓存包含所有 trial 但不进行跨 trial 拟合。训练 DataLoader 只接收源被试索引，测试在最终 epoch 后 eval/inference_mode 执行。每次 forward 清空 LIF 内存，跨 batch 不继承状态。完整训练和测试身份数组保存在 details/evaluation.npz，可直接审计。
 
-本实现没有复制不完整参考文献中的未知设置，也未根据本地冒烟 ACC 调整模型。参数量、FLOPs/SOPs、配对检验和硬件效率分析需要正式实验及相应基线或服务器测量，不能从冒烟结果推断。
+本实现没有复制不完整参考文献中的未知设置，也未根据本地冒烟 ACC 调整模型。参数量可直接由模型结构计数；FLOPs 需明确输入及计数口径，SOPs/配对检验/硬件效率需相应已训练模型、正式测试或服务器测量，不能从冒烟 ACC 推断。
 
 **2026-10-20：服务器双 GPU 执行**
 
@@ -106,3 +106,15 @@ SpikingJelly 的输入衰减和硬重置语义依据其 [LIFNode 文档](https:/
 当前仅统计 temporal.blocks 内所有 Conv1d/LIFNode 的前向与反向四项。前向用层 pre/post hook；反向只包围实际参与 loss 的归属节点。输入上游节点排除，重置后的 LIF 膜电位图纳入，以覆盖跨步梯度；非目标 BN/残差等不计入。没有改变 model.py 或任何训练科学参数，原 epoch 边界同步和有限值检查保留；没有执行多步/CuPy/融合/AMP 等优化。
 
 源码认证支持修改前 v7 的真实断点续训；旧四项时间未知，记录覆盖率。新的四项区间之和不等于原第二模块整体区间。说明、官方依据与审计结果见 [第二模块计时排查](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
+
+## 第二模块逐层/逐步与底层算子诊断（v9）
+
+保留 v8 四项总计及训练计算。T2 Conv/LIF 增加层名、仿真步、反向节点名称、实际 batch size、首次/后续 batch、累计/最大区间和 Host 区间；跨步共享 AccumulateGrad 单列 step=0。逐 epoch 日志不显示 trial 均摊值，详细数据合并在一个 details/t2_diagnostics.json，并随 checkpoint 历史保存。
+
+新增 utils/operator_profile.py，使用内置 PyTorch profiler，仅对每次启动/续训后每个任务的首个新 epoch 中一个 batch 采样。只保留 T2 标记内的 CPU self、直接关联 kernel 及算子次数，避免父子 inclusive 时间重复累计；不可用的 CUDA 数据标记 NA。配置 t2_profile_batch=2，0 可关闭重型采样；不改变 batch size、数据顺序或梯度。模型、优化器、依赖、确定性等未改动。
+
+固定版本源码排查发现 torch 2.5.1 的 contiguous 确定性膨胀卷积会绕开 cuDNN；慢速 CUDA 路径前向逐样本/通道填充 bias，而反向没有对应初始化循环。这是前向耗时突出的首要嫌疑；需服务器实际 BACKEND、copy_/fill_ 及 kernel 分布验证，不以 CPU 冒烟时间替代 GPU 测量。
+
+支持固定摘要认证的 v8 train/evaluate/timing/provenance 升级到 v9，更早版本规则保留；v8 四项时间保留，新细节不补造历史。新采样工具纳入源码归档与后续恢复校验。真实 Benchmark 小样本上验证四组 v8 中断后恢复与原版连续训练权重、预测、训练/监测指标一致；本机没有 CUDA，GPU 性能结论待服务器验证。
+
+用户补充的效率表属于 12 类、0.5 s：3.016 M 参数、32.016 M FLOPs、836.362 K SOPs、2.735 ms/trial；SOPs 为 1,800 个未见 trial 均值。当前 40 类模型实算 4,584,088 个可训练参数，数据集输入/输出尺寸不同，不能仅因总量不同判定复现偏差。启动日志及 provenance 增加参数分解记录；当前只诊断，不修改结构以拟合这张 12 类表。

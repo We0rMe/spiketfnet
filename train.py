@@ -24,7 +24,8 @@ from data import WindowDataset, file_sha256, loso_indices, prepare_data
 from evaluate import (evaluate_model, plot_confusion, plot_training, read_history, refresh_progress,
                       resolve_device, run_path, save_evaluation, summarize_experiment, write_json, write_run_report)
 from experiments.variants import build_model, joint_loss
-from utils.timing import BranchTimer, HISTORY_KEYS, normalize_history, timing_log
+from utils.timing import BranchTimer, HISTORY_KEYS, normalize_history, timing_log, detailed_timing_log
+from utils.operator_profile import runtime_settings, model_parameters
 from utils.provenance import SOURCE_NAMES, validate_resume
 
 
@@ -54,15 +55,16 @@ def environment_info(device):
             "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None}
 
 
-def train_epoch(model, loader, optimizer, cfg, device):
+def train_epoch(model, loader, optimizer, cfg, device, profile_batch=0):
     model.train()
     total_loss = torch.zeros((), dtype=torch.float64, device=device)
     correct = torch.zeros((), dtype=torch.long, device=device)
     count = 0
-    with BranchTimer(model, device, cfg.time_branches) as timer:
-        for time, spectrum, labels in loader:
+    with BranchTimer(model, device, cfg.time_branches, profile_batch) as timer:
+        for batch, (time, spectrum, labels) in enumerate(loader, 1):
             time, spectrum, labels = (value.to(device, non_blocking=True) for value in (time, spectrum, labels))
             optimizer.zero_grad(set_to_none=True)
+            timer.begin_batch(batch, len(labels))
             outputs = model(time, spectrum)
             loss = joint_loss(outputs, labels, cfg)
             if not torch.isfinite(loss):
@@ -78,17 +80,19 @@ def train_epoch(model, loader, optimizer, cfg, device):
                 if not finite_gradients:
                     raise FloatingPointError("Nonfinite training gradients")
             optimizer.step()
+            timer.end_batch()
             total_loss += loss.detach().double() * len(labels)
             correct += (outputs["logits"].argmax(1) == labels).sum()
             count += len(labels)
         branch_times = timer.totals()
+        diagnostics = timer.details()
     if count == 0:
         raise ValueError("Empty training loader")
     finite_parameters = torch.stack([torch.isfinite(p).all() for p in model.parameters()]).all()
     if not finite_parameters:
         raise FloatingPointError("Nonfinite model parameters at epoch end")
     return {"loss": total_loss.item() / count, "train_acc_percent": 100 * correct.item() / count,
-            "train_trials": count, **branch_times}
+            "train_trials": count, **branch_times, "_t2_diagnostics": diagnostics}
 
 
 class Tee:
@@ -235,10 +239,14 @@ def preserved_rng(generator, device):
 
 def write_history(path, history):
     with path.with_suffix(".tmp").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=HISTORY_KEYS)
+        writer = csv.DictWriter(handle, fieldnames=HISTORY_KEYS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(normalize_history(history))
     path.with_suffix(".tmp").replace(path)
+    diagnostics = {str(row["epoch"]): row["_t2_diagnostics"] for row in history
+                   if row.get("_t2_diagnostics") is not None}
+    if diagnostics:
+        write_json(Path(path).with_name("t2_diagnostics.json"), diagnostics)
 
 
 def save_resume(path, model, optimizer, generator, device, history, job, prepared):
@@ -305,6 +313,7 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
                   "training_subjects": sorted(set(prepared.ids[training_rows, 0].tolist())),
                   "seed": seed, "window_ms": window, "epochs": cfg.epochs,
                   "device": str(device), "worker_pid": os.getpid(),
+                  "timing_environment": runtime_settings(device),
                   "training_trials": len(training_rows), "test_trials": len(test_rows),
                   "monitor": "Source training subjects, block 1, eval mode; NOT validation",
                   "monitor_trials": len(monitor_rows), "monitor_every": cfg.monitor_every}
@@ -315,6 +324,7 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
     train_loader = DataLoader(Subset(dataset, training_rows.tolist()), shuffle=True, generator=generator, **common)
     test_loader = DataLoader(Subset(dataset, test_rows.tolist()), shuffle=False, **common)
     model = build_model(cfg).to(device)
+    provenance["model_parameters"] = model_parameters(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     history = []
     if resume_file.exists():
@@ -358,14 +368,19 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
     print(f"TRAIN {len(training_rows)} trials; MONITOR {len(monitor_rows)} source block-1 trials (NOT validation); "
           f"TEST {len(test_rows)} trials after epoch {cfg.epochs} only.", flush=True)
     print(f"MODEL {cfg.model_variant}; T2 Conv/LIF timing={'ON' if cfg.time_branches else 'OFF'} "
-          "(four totals: Conv forward/backward, LIF forward/backward; other operations excluded).", flush=True)
+          "(four totals + layer/step detail; other operations excluded).", flush=True)
+    print("T2 RUNTIME " + json.dumps(provenance["timing_environment"], ensure_ascii=False), flush=True)
+    print("MODEL PARAMETERS " + json.dumps(provenance["model_parameters"], ensure_ascii=False), flush=True)
+    first_new_epoch = len(history) + 1
     with preserved_rng(generator, device):
         update_run_artifacts(folder, cfg, history, provenance)
     try:
         for epoch in range(len(history) + 1, cfg.epochs + 1):
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
-            row = {"epoch": epoch, **train_epoch(model, train_loader, optimizer, cfg, device)}
+            sample_batch = min(cfg.t2_profile_batch, len(train_loader)) if epoch == first_new_epoch else 0
+            row = {"epoch": epoch, **train_epoch(model, train_loader, optimizer, cfg, device,
+                                                 profile_batch=sample_batch)}
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             if cfg.monitor_every and (epoch == 1 or epoch % cfg.monitor_every == 0 or epoch == cfg.epochs):
@@ -383,6 +398,8 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
             print(f"[{device}] {window}ms S{subject:02d} seed={seed} epoch={epoch}/{cfg.epochs} "
                   f"loss={row['loss']:.4f} train_ACC={row['train_acc_percent']:.2f}% "
                   f"{monitor_text}{timing_log(row)}", flush=True)
+            for line in detailed_timing_log(row.get("_t2_diagnostics")):
+                print(f"[{device}] epoch={epoch} {line}", flush=True)
         atomic_torch_save(model.state_dict(), private / "model.pt")
         plot_history(history, folder / "training.png", f"{window} ms | test S{subject:02d} | seed {seed} | {purpose}")
         metrics, arrays = evaluate_model(model, test_loader, cfg, window, device)
@@ -534,7 +551,7 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
                 "dataset_fingerprint": prepared.metadata["fingerprint"], "code_sha256": code_hashes,
                 "selected_trial_count": len(prepared.ids), "selection": "final epoch only; no target-dependent selection",
                 "statistics": "Population variance by default, not standard deviation; ITR computed per subject/seed first"}
-    manifest.update(format_version=8, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
+    manifest.update(format_version=9, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
                     monitoring="Source training block 1 in eval mode; no validation set or test-based selection")
     if previous is not None:
         manifest["created_utc"] = previous["created_utc"]

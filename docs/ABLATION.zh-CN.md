@@ -107,19 +107,19 @@ M=1 时跨种子的总体方差为零，不代表结果稳定；可查看跨被�
 真实逐 trial 预测、身份及辅助输出保留在 evaluation.npz，不另存重复预测文件。
 ITR 沿用原公式，500 ms 时选择周期为 0.5 + 0.5 = 1.0 s。
 
-新版实验清单为 v8。已审查的 v4/v5/v6/v7 四组断点可迁移到整理后的目录结构；旧 v3 完整模型断点只有在归档的 train/evaluate 与已审查摘要相符、model/data 不变、科学配置兼容时才允许迁移；v2 原有迁移规则仍保留。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。
+新版实验清单为 v9。已审查的 v4/v5/v6/v7/v8 四组断点可迁移到整理后的目录结构；旧 v3 完整模型断点只有在归档的 train/evaluate 与已审查摘要相符、model/data 不变、科学配置兼容时才允许迁移；v2 原有迁移规则仍保留。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。
 旧配置缺少 model_variant 时解释为 full，不放宽未知源码变更的校验。
 升级服务器前应先停止旧进程及其子进程，再同步代码，保留结果目录和原配置，以 `python train.py` 继续原完整模型实验。
 原 1000 ms 实验使用原输出路径，消融使用新根目录，不移动旧权重。
 
-## 联合训练与三项计时
+## 联合训练与第二模块诊断
 
 完整模型对每个 batch 依次计算频域、时域分支，再融合；主 CE 与辅助 CE 相加后只调用一次 backward 和一次 Adam.step，两个分支及融合模块联合优化。
 没有分别预训练后再融合，也没有把同一个模型的两个分支分放到两张卡。两张卡运行的是不同 LOSO 任务。
 
-`CONFIG.time_branches=True` 当前只开启第二模块的算子诊断。日志只显示 T2 Conv Forward / T2 Conv Backward / T2 LIF Forward / T2 LIF Backward 四项秒数；所有残差块与仿真步汇总，不显示 trial 均值。full、temporal_only、equal_fusion 使用同一计时范围，spectral_only 四项为 0。
+`CONFIG.time_branches=True` 当前只开启第二模块的算子诊断。先显示 T2 Conv Forward / T2 Conv Backward / T2 LIF Forward / T2 LIF Backward 四项秒数，再附逐层、逐仿真步、主机提交区间和调用数，不显示 trial 均值。full、temporal_only、equal_fusion 使用同一计时范围，spectral_only 四项为 0。
 
-数据继续保存在原 history.csv、report.md 和组级/批次汇总；旧 epoch 的四项诊断缺失不会补造。模型与训练计算保持不变，计时、同步排查及研究依据详见 [第二模块诊断与排查](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
+`CONFIG.t2_profile_batch=2` 在每个任务每次启动/续训后的首个新 epoch 对一个 batch 采样底层算子及 CUDA kernel；0 关闭此采样。采样有明显开销，后续 epoch 不重复采样。详细记录集中到该任务 `details/t2_diagnostics.json`，运行时配置写入 provenance.json；现有四项及汇总保留，旧 epoch 没有细节的不补造。模型与训练计算保持不变，计时、同步排查及研究依据详见 [第二模块诊断与排查](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
 
 ## 本地验证
 
