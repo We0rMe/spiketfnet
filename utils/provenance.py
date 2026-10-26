@@ -10,7 +10,15 @@ SOURCE_NAMES = (
     "config.py", "data.py", "model.py", "train.py", "evaluate.py", "requirements.txt",
     "experiments/__init__.py", "experiments/ablation.py", "experiments/variants.py",
     "utils/__init__.py", "utils/timing.py", "utils/provenance.py", "utils/operator_profile.py", "utils/branch_timing.py",
+    "utils/configuration.py",
 )
+
+CONFIG_V12_SOURCES = {
+    "model.py": "e32b1f874a1e55ae5f6633e711525ad0a89ea0866f56072e246853c89e8332b1",
+    "train.py": "73a3bd52a9e6a3f9b2900503e3121a312979578b5210024770d2aae3fafc6eef",
+    "evaluate.py": "f66d7368c1474baf64d2e48bac03d081355389bfd45eb11d51d7001d0d461102",
+    "utils/provenance.py": "34c275ed64d24dfd4e8c7c14779a8339e12eff7d452d44959817e8e558c1658e",
+}
 
 LEGACY_SOURCE_PATHS = {
     "ablation_model.py": "experiments/variants.py",
@@ -136,6 +144,8 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
     checked_sources = ("model.py", "data.py") if manifest.get("format_version", 1) == 1 else (
         "model.py", "data.py", "train.py", "evaluate.py")
     version = manifest.get("format_version", 1)
+    if version >= 13:
+        checked_sources += ("utils/configuration.py",)
     if version >= 11:
         checked_sources += ("utils/branch_timing.py", "experiments/ablation.py")
     if version >= 9:
@@ -155,6 +165,9 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
         if previous_hash == code_hashes[current_name]:
             continue
         if verified_line_endings(name, current_name, previous_hash, code_hashes[current_name], details):
+            continue
+        if version <= 12 and verified_source_upgrade(name, previous_hash, details, CONFIG_V12_SOURCES):
+            print(f"Verified v{version} configuration upgrade: {name}; saved dropout settings preserved.", flush=True)
             continue
         if version == 11 and verified_source_upgrade(name, previous_hash, details, STD_REPORTING_V11_SOURCES):
             print(f"Verified v11 standard-deviation reporting upgrade: {name}; training unchanged.", flush=True)

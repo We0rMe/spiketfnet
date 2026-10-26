@@ -5,6 +5,7 @@ cache/
 results/
 results_server/
 tmp/
+smoke_tests/temporal_validation
 smoke_tests/results/
 smoke_tests/results_server/
 *.mat

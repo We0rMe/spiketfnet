@@ -6,7 +6,8 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 
 | 文件 | 功能 |
 | --- | --- |
-| `config.py` | 唯一常规修改入口：数据路径、N/M/seed、六种窗口、训练和网络超参数 |
+| `config.py` | 日常修改入口：实验范围、值得调节的超参数、数据路径和设备 |
+| `utils/configuration.py` | 完整快照定义、固定数据/协议/运行默认值、校验及历史配置读取；不是第二个调参入口 |
 | `data.py` | 数据读取、完整 trial 独立滤波、裁窗、FFT、缓存和 LOSO 划分 |
 | `model.py` | 频域分支、脉冲时域分支、门控及联合损失 |
 | `train.py` | N 折 × M 种子训练；只测试固定最后一轮权重 |
@@ -25,26 +26,25 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 
 ## 运行
 
-先修改 `config.py`。没有命令行参数解析，也不需要额外 YAML/JSON 配置。
+先修改 `config.py`。没有命令行参数解析，也不需要额外 YAML/JSON。文件中的 `CONFIG = Config(...)` 是当前实验的唯一参数入口；固定数据属性、预处理规则、LIF 实现约定、绘图和诊断默认值收在 `utils/configuration.py`，仍完整写入实验快照，以便复核和恢复旧实验。
 
-```python
-data_root = Path("/your/server/benchmark")
-N = 35                    # 测试被试依次 S1,...,SN
-M = 1                     # 当前先做单种子；改为 3 时使用 42、43、44
-seed = 42                 # 起始种子
-windows_ms = (1000,)       # 当前只训练 1000 ms
-simulation_steps = 4       # Ts，可以修改
-device = "cuda"           # 训练设备：cuda 使用下列 GPU 池；auto 允许 CPU 回落
-gpu_ids = (0, 1)           # 两张 GPU 各运行一个独立训练任务
-evaluation_device = "cuda:0"  # 单独运行 evaluate.py 时使用的设备
-resume = True             # 同名实验恢复；完成的任务自动跳过
-check_gradients = False   # 正式训练关闭逐 batch 全梯度扫描
-monitor_every = 5         # 源训练子集监测，非验证集；首轮、末轮也测，0 禁用
-plot_every = 1            # 每个 epoch 覆盖更新训练曲线和单次报告
-experiment_name = "spiketfnet"
+本轮配置是**尚待验证的参数候选**：1000 ms，N=7、M=2（种子42、43），时间分支骨干dropout=0.1，时间卷积核31/7。频谱分支及全部投影头dropout保持0.5；宽度64、辅助损失0.3、仿真4步、Adam学习率0.001、L2 0.001、batch128、100轮保持。没有加入按步BN、源数据校准或32段读出；仍使用原共享BN和全局平均汇总。大核不是作者公开参数，候选组合也不等于已经验证有效。
+
+**本轮服务器入口：**
+
+```bash
+python -m experiments.ablation
 ```
 
-N 只限制测试折数。即使 N=1，正式训练仍用除 S1 外的全部 34 名被试，不能把源被试池缩小为 N 个人。当前单窗口、35 折、单种子共 35 个独立模型；扩展到 6 个窗口 × 35 折 × 3 种子时共 630 个模型。调试服务器配置时可先设 N=1、M=1、`windows_ms=(500,)`，另起实验名称；不要把这种子集成绩当成完整 LOSO 结果。
+默认只运行 `temporal_only`，共14个独立模型，结果在 `results/temporal_tuning_v1/temporal_only/`。时间分支保留融合中的时间投影及最终分类头。`python train.py` 仍运行完整双分支模型，留待下一阶段；不要同时把它写入本轮消融批次目录。
+
+N仅限制测试折；即使N=1，每折仍用其余34名源被试。先做7折×2种子用于开发筛查；两个种子用于检查初始化波动，7名被试用于检查改善是否只来自个别人，不能保证得到完整35折的结论。
+
+为判断新参数的实际价值，建议补一组**同样7折×2种子**的原参数对照：只将 `temporal_dropout=0.5`、`stem_kernel=7`、`residual_kernel=3`，以及 `experiment_name="temporal_control_v1"`。其他设置一致，包括内部固定的split_bias执行策略。两组总计28个模型，双GPU各运行一个独立任务；本轮不同时训练full、spectral_only和equal_fusion。旧单种子或native结果仅作参考，不能代替两个种子的配对对照。
+
+先比较同一被试、同一种子的训练监测ACC及末轮测试ACC/ITR，再按被试平均两个种子的差值。若两个种子的整体改善方向一致、提升覆盖多数被试、训练监测也改善，再扩大验证；若仅训练成绩提高，说明仍需验证分段汇总等结构方案。此次同时改变dropout和核宽，只能判断组合价值，不能分离各因素贡献。这些折一旦用于选择参数，应视为开发结果，不能再称为从未参与选择的最终测试证据。
+
+数据路径保留当前服务器 `I:\jjh\SSVEP\data\benchmark`；本地数据为 `G:\SSVEP\data\benchmark`。设备仍为 `device="cuda"`、`gpu_ids=(0,1)`；`resume=True` 自动恢复同一候选。本地只做软件冒烟，不启动上述训练。
 
 服务器建议 Python 3.9–3.12（本地已测试 3.12）。`requirements.txt` 固定 PyTorch 2.5.1 / torchvision 0.20.1 的 CUDA 12.1 构建，需要兼容的 NVIDIA 驱动。构建对应关系见 [PyTorch 官方历史版本说明](https://pytorch.org/get-started/previous-versions/)。Linux 服务器安装和启动：
 
@@ -79,18 +79,15 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 ## 消融实验
 
-新增 `python -m experiments.ablation`，默认 Benchmark、500 ms、35 折、单种子，运行 full / spectral_only / temporal_only / equal_fusion 四组。
-在 `config.py` 末尾只修改 `ABLATION_GROUPS` 选择组别，修改 `ABLATION_WINDOWS_MS` 选择窗口；N/M/seed、设备和其余训练设置继承 CONFIG。
-例如 `ABLATION_GROUPS = ("spectral_only",)` 只运行频域组，默认四项列表则依次运行全部四组。
-结果子目录按组名自动生成，不需要逐组修改 experiment_name。Config.model_variant 是内部记录字段，ABLATION_CONFIG 是派生配置，都不作为运行选择入口。
-结果位于 `results/ablation/<组别>/`，各组独立恢复；总表为 `results/ablation/comparison.csv`。
-单分支保留对应融合投影和最终分类头，等权组使用固定 0.5/0.5。详见 [消融运行与实现约定](docs/ABLATION.zh-CN.md)。
+`python -m experiments.ablation` 读取 `config.py` 的 `ABLATION_GROUPS`；当前只选时间分支。窗口直接使用 `CONFIG.windows_ms`，不再重复定义 `ABLATION_WINDOWS_MS`；批次路径由 `CONFIG.experiment_name` 派生，不再维护 `ABLATION_ROOT`。N/M/seed和其他参数同样直接继承。可选full / spectral_only / temporal_only / equal_fusion。
 
-新版清单为 v12，按更正后的要求统一展示均值 ± 标准差，保留三项分支时间和统计轴；模型计算和参数键名不变。已验证 v11 四组 split_bias 断点续训与旧版连续训练结果逐位一致；更早版本的认证迁移规则保留。新消融实验不能接续其他组权重。
+结果位于 `results/<experiment_name>/<组别>/`；各组独立恢复，总表为批次根目录的 `comparison.csv`。单分支保留对应融合投影和最终分类头，等权组使用固定0.5/0.5。详见 [消融说明](docs/ABLATION.zh-CN.md)。
+
+当前清单v13归档内部配置实现并校验其源码。历史快照缺少 `temporal_dropout` 时按旧版共享dropout恢复，绝不继承当前候选0.1。已认证v12及更早升级规则保留；更改dropout或核宽等参数仍要求新目录。旧实验续训须使用旧快照的完整设置，不能直接运行当前候选。
 
 ## 耗时和恢复
 
-默认 `time_branches=True`、`t2_profile_batch=0`，每个 epoch 只显示三项时间，不显示每 trial 均摊值：
+内部运行策略固定默认 `time_branches=True`、`t2_profile_batch=0`，每个 epoch 只显示三项时间，不显示每 trial 均摊值：
 
 ```text
 Spectral Times=...s | Temporal Times=...s | Total Time=...s
@@ -102,15 +99,15 @@ Spectral Times=...s | Temporal Times=...s | Total Time=...s
 
 旧版只有 T2 局部计时，无法恢复完整分支/epoch 时长，因此保留未知。已存在的日志、细粒度历史不删改，新三项从后续 epoch 开始记录；报告明确已记录 epoch 数，不把部分累计称为完整总时长。
 
-需要再次诊断时显式设 `t2_profile_batch>0`：开启每轮 T2 逐层/逐步诊断，并在每次启动后首个新 epoch 的指定 batch 做一次 profiler 采样。设 0 同时关闭细粒度 hooks 和采样。详细记录集中在原 `details/t2_diagnostics.json`，不新增逐 batch 文件。`provenance.json` 继续记录实际 worker 环境和模型参数量。完整边界与服务器性能结果见 [第二模块诊断与排查](docs/TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
+仅开发者再次排查性能时，在内部运行策略中设 `t2_profile_batch>0`：开启每轮 T2 逐层/逐步诊断，并在每次启动后首个新 epoch 的指定 batch 做一次 profiler 采样。设 0 同时关闭细粒度 hooks 和采样。详细记录集中在原 `details/t2_diagnostics.json`，不新增逐 batch 文件。`provenance.json` 继续记录实际 worker 环境和模型参数量。完整边界与服务器性能结果见 [第二模块诊断与排查](docs/TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
 
 每个任务开始时保存 epoch 0，之后每个完整 epoch 原子替换 `details/resume.pt`。该文件包含模型、Adam 状态、epoch、训练历史、Python/NumPy/Torch/CUDA 随机状态和 DataLoader 的打乱生成器状态。中途停止后，执行同一条 `python train.py` 即从最后成功保存的 epoch 后继续；当前未保存的 epoch 会重做。最终测试成功后删除恢复文件，只保留 `model.pt`。checkpoint 是恢复用途，测试仍只使用固定最后一轮模型。
 
 恢复会校验数据指纹、trial 身份、模型/预处理和训练设置。可调整 N、M、起始 seed 和设备分配；学习率、batch size、epoch 总数、网络参数、确定性设置变化必须使用新实验名。窗口修改仍要求预处理指纹一致。新格式还校验训练与评估代码哈希；环境或 CPU/CUDA 后端变化不保证逐位相同，运行环境会记入恢复记录。
 
-断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2–v11 源码（兼容 LF/CRLF 换行），才允许升级至 v12。旧消融模型按原名校验并映射到新路径；旧计时工具仅在固定摘要认证通过后升级。native 路径的模型计算、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。执行模式改变需新建实验，不能把参数可加载误认为数值轨迹完全一致。
+断点迁移先验证已归档源码与原哈希一致，再核对是否为已审查的 v2–v12 源码（兼容 LF/CRLF 换行），才允许升级至当前版本。旧消融模型按原名校验并映射到新路径；旧计时工具仅在固定摘要认证通过后升级。native 路径的模型计算、预处理、优化器和训练数据顺序保持不变；监测前后恢复全部随机状态。未知代码修改不会绕过校验，有历史记录却缺失权重的新版任务也会停止报错，不会静默从头训练。执行模式改变需新建实验，不能把参数可加载误认为数值轨迹完全一致。
 
-升级步骤：先停止服务器现有训练并确认子进程退出；同步新版代码；保留原 `experiment_name`、数据路径、N/M/seed 和科学参数，保持 `resume=True`；再次运行 `python train.py`。无需重命名、搬动或删除现有结果目录。已完成任务只补充展示文件，不重新训练；未完成任务从 checkpoint 的 epoch 继续。不要在训练仍运行时单独启动 `evaluate.py`。
+升级步骤：先停止服务器现有训练并确认子进程退出；同步新版代码；保留原 `experiment_name`、数据路径、N/M/seed 和科学参数，保持 `resume=True`；不要使用本轮候选覆盖旧参数；再次运行 `python train.py`。无需重命名、搬动或删除现有结果目录。已完成任务只补充展示文件，不重新训练；未完成任务从 checkpoint 的 epoch 继续。不要在训练仍运行时单独启动 `evaluate.py`。
 
 旧训练历史可以重新绘图并在新日志中生成带 `RECOVERED` 标记的记录，但这不是原控制台日志。旧 epoch 的监测 loss/ACC 从未计算过，不能事后补造；监测曲线只从升级后的实际测量点开始，空缺不会填 0。新增监测和实时绘图会有额外耗时，可调整 `monitor_every`、`plot_every`，不改变优化过程。
 
@@ -183,6 +180,8 @@ refresh_saved_reports(r"G:\SSVEP\SpikeTFNet\results_server\spiketfnet")
 
 ## 本地冒烟
 
+本轮配置改动专用检查：`python smoke_tests/run_config_smoke.py`，检查结果位于 `smoke_tests/results/config_check/report.json`；同时验证旧共享dropout的数值兼容。
+
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r smoke_tests\requirements.txt
 .\.venv\Scripts\python.exe smoke_tests\run_smoke.py
@@ -202,12 +201,10 @@ refresh_saved_reports(r"G:\SSVEP\SpikeTFNet\results_server\spiketfnet")
 
 `run_reporting_smoke.py` 使用 `smoke_tests/fixtures/` 中冻结的 v2 源码生成真实旧断点，与新版监测、实时输出及双进程恢复作对照。结果在 `smoke_tests/results/reporting_check/`。冻结源码仅供冒烟测试，不是服务器训练入口。
 
-`run_layout_smoke.py` 默认验证 v11 四组 split_bias 断点升级到 v12 的训练轨迹、预测、历史、标准差汇总和源码认证，结果在 smoke_tests/results/std_reporting_check/。可从 Python 调用 main(output_name="新目录", version=5/6/7/8/9/10) 验证更早版本。全部为 CPU 小样本，不能代替服务器 GPU 性能测量。
+`run_layout_smoke.py` 默认验证 v11 四组 split_bias 断点升级到当前版本 的训练轨迹、预测、历史、标准差汇总和源码认证，结果在 smoke_tests/results/std_reporting_check/。可从 Python 调用 main(output_name="新目录", version=5/6/7/8/9/10) 验证更早版本。全部为 CPU 小样本，不能代替服务器 GPU 性能测量。
 
-## 膨胀卷积性能改善（可选）
+## 膨胀卷积执行策略
 
-服务器日志已确认 PyTorch 2.5.1 确定性膨胀卷积走慢速实现，d=2/4 前向有大量逐通道 bias 拷贝。`config.py` 的 `t2_conv_execution="native"` 默认保持旧计算路径；`"split_bias"` 保留偏置参数但改为卷积后一次广播加法，仅应用于 T2 的 d>1 卷积。参数键名/数量和数学定义保持不变，但浮点累加顺序可能改变，不能保证旧训练轨迹逐位一致。
+新实验内部默认使用已验证的split_bias：d>1卷积先计算无偏置结果，再广播加上偏置，规避旧CUDA实现的性能问题。它是固定执行策略，不占日常调参区。历史快照按记录恢复；更早快照缺此字段时明确恢复为native。两条路径数学等价，但浮点轨迹可能不同，仍禁止切换路径后接续旧实验。
 
-先在空闲 GPU 运行 `python smoke_tests/run_conv_benchmark.py`（设备在脚本顶部 DEVICE 修改），检查输出/梯度误差和实际收益；结果仅写 `smoke_tests/results/conv_benchmark/report.json`。计时与 profiler 分开，CPU 运行只验证流程。无需重新安装 requirements.txt。
-
-当前实验继续用 native 和原目录恢复。尝试 split_bias 正式训练时，普通实验更换 `experiment_name`，消融批次更换 `ABLATION_ROOT`，并将所有实验组统一配置；恢复校验拒绝同一实验中切换执行模式。split_bias 的同模式续训照常支持。详见 [服务器证据、方案与边界](docs/TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
+必要时用 `python smoke_tests/run_conv_benchmark.py` 重新测量服务器表现。详细历史见 [性能排查](docs/TEMPORAL2_TIMING_AUDIT.zh-CN.md)。

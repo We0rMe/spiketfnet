@@ -74,7 +74,7 @@ class SpikingResidualBlock(nn.Module):
                                                padding=dilation * (cfg.residual_kernel // 2), dilation=dilation),
                                      nn.BatchNorm1d(width), lif_node(cfg))
         self.pointwise = nn.Sequential(nn.Conv1d(width, width, 1), nn.BatchNorm1d(width), lif_node(cfg))
-        self.dropout = nn.Dropout(cfg.dropout)
+        self.dropout = nn.Dropout(cfg.temporal_backbone_dropout)
 
     def forward(self, x):
         return x + self.dropout(self.pointwise(self.dilated(x)))
@@ -107,7 +107,7 @@ class TemporalBranch(nn.Module):
         self.current = nn.Sequential(nn.Conv1d(len(cfg.channels), cfg.temporal_width, cfg.stem_kernel,
                                                padding=cfg.stem_kernel // 2), nn.BatchNorm1d(cfg.temporal_width))
         self.encoder = lif_node(cfg)
-        self.dropout = nn.Dropout(cfg.dropout)
+        self.dropout = nn.Dropout(cfg.temporal_backbone_dropout)
         self.blocks = nn.Sequential(*(SpikingResidualBlock(cfg, dilation) for dilation in cfg.dilations))
         self.attention = SpikeAttention(cfg)
         self.embedding = projection(cfg.temporal_width, cfg.embedding_dim, cfg.dropout)

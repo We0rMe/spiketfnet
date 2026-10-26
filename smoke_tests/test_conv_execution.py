@@ -12,12 +12,14 @@ import numpy as np
 import torch
 from torch import nn
 
-from config import CONFIG, PROJECT_ROOT, Config
+from config import PROJECT_ROOT, Config
 from data import PreparedData, file_sha256
 from experiments.variants import build_model, joint_loss
 from model import SplitBiasConv1d
 from train import seed_everything
 from utils.provenance import CONV_EXECUTION_V9_SOURCES, SOURCE_NAMES, validate_resume, verified_source_upgrade
+
+CONFIG = Config(t2_conv_execution="native")  # 历史回归不得继承当前候选的 dropout。
 
 
 class ConvExecutionTests(unittest.TestCase):

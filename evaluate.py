@@ -16,7 +16,7 @@ from data import WindowDataset, file_sha256, prepare_data
 from experiments.variants import build_model
 from utils.timing import normalize_history
 from utils.branch_timing import timing_markdown, timing_rows, timing_totals
-from utils.provenance import CONV_EXECUTION_V9_SOURCES, verified_source_upgrade, verified_line_endings
+from utils.provenance import CONFIG_V12_SOURCES, CONV_EXECUTION_V9_SOURCES, verified_source_upgrade, verified_line_endings
 
 
 def write_text(path, text):
@@ -402,13 +402,23 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
         cfg = replace(cfg, data_root=Path(data_root))
     if device_name is not None:
         cfg = replace(cfg, evaluation_device=device_name)
+    if manifest.get("format_version", 1) >= 13:
+        name = "utils/configuration.py"
+        current_hash = file_sha256(PROJECT_ROOT / name)
+        previous_hash = manifest["code_sha256"][name]
+        if current_hash != previous_hash and not verified_line_endings(
+                name, name, previous_hash, current_hash, root / "details"):
+            raise ValueError("Configuration implementation changed; use the archived source")
     if file_sha256(Path(__file__).with_name("model.py")) != manifest["code_sha256"]["model.py"]:
         known_native = (manifest.get("format_version", 1) <= 9 and cfg.t2_conv_execution == "native"
                         and verified_source_upgrade("model.py", manifest["code_sha256"]["model.py"],
                                                     root / "details", CONV_EXECUTION_V9_SOURCES))
         same_code = verified_line_endings("model.py", "model.py", manifest["code_sha256"]["model.py"],
                                          file_sha256(Path(__file__).with_name("model.py")), root / "details")
-        if not known_native and not same_code:
+        known_config_upgrade = (manifest.get("format_version", 1) <= 12
+                                and verified_source_upgrade("model.py", manifest["code_sha256"]["model.py"],
+                                                            root / "details", CONFIG_V12_SOURCES))
+        if not known_native and not same_code and not known_config_upgrade:
             raise ValueError("Model source changed; use the archived source to replay this experiment")
     variant_key = "experiments/variants.py" if manifest.get("format_version", 1) >= 6 else "ablation_model.py"
     if manifest.get("format_version", 1) >= 4 and file_sha256(

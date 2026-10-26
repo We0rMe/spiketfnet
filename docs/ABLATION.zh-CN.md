@@ -1,48 +1,22 @@
 # SpikeTFNet 消融实验
 
-仅使用 Benchmark 40 类数据，默认 500 ms、35 折 LOSO、每折一个种子 42、100 epochs。
-四组共 140 个独立训练任务。500 ms 的完整模型须重新训练，1000 ms 结果不能替代该基线。
+仅使用Benchmark 40类数据。当前为时间分支参数验证：1000 ms、7折、每折种子42和43、100 epochs，共14个独立模型。每折仍由其余34名被试的全部试次训练。
 
 ## 配置与运行
 
-参数统一在 `config.py`。**只修改文件末尾的 `ABLATION_GROUPS` 来选择组别**；不再提供 MODEL_VARIANTS 这个易混淆的配置项。
-`Config.model_variant` 是自动写入快照/断点的内部字段，不要手动修改。`ABLATION_CONFIG` 也是内部派生配置，无需修改。
-
-```python
-ABLATION_GROUPS = ("full", "spectral_only", "temporal_only", "equal_fusion")
-ABLATION_WINDOWS_MS = (500,)
-ABLATION_ROOT = CONFIG.output_root / "ablation"
-```
-
-确认 `CONFIG.data_root` 为服务器 Benchmark 路径。N、M、seed、优化器、网络参数和设备均继承 `CONFIG`，当前 N=35、M=1、seed=42、Ts=4。
-服务器使用 `device="cuda"`、`gpu_ids=(0, 1)`，然后在项目根目录执行：
+唯一日常入口为 `config.py`：`CONFIG` 设置窗口、N/M/seed、超参数及设备，`ABLATION_GROUPS=("temporal_only",)` 设置当前组别。另可选full / spectral_only / equal_fusion。模型变体字段与派生配置由程序自动维护。
 
 ```bash
 python -m experiments.ablation
 ```
 
-在项目根目录执行。消融入口和模型变体集中在 `experiments/`，仍共享根目录的配置、数据、训练和评估脚本；结果路径与整理前相同。
+窗口直接继承 `CONFIG.windows_ms`，批次目录为 `results/<experiment_name>/`，无需重复配置窗口或根目录。更换参数时更换experiment_name；若复用已存在目录，程序会检查配置、源码与数据一致性。
 
-按配置顺序逐组训练；每组内部两张 GPU 分担独立的窗口/被试/种子任务，每张卡一个进程。
-单模型的 batch size、学习率和数据划分保持原样。`device="cuda:0"` 则仅使用第一张卡。
-
-只训练一组时，例如：
-
-```python
-ABLATION_GROUPS = ("spectral_only",)
-```
-
-运行哪个组只需修改上述一行，然后执行同一个 `python -m experiments.ablation`。组名、窗口、被试和种子目录全部自动命名，不需要逐组修改 experiment_name。
-`Config.experiment_name` 只控制 `python train.py` 的普通完整模型实验目录。
-
-窗口仍可选择，例如 `ABLATION_WINDOWS_MS=(500, 1000)`，已选组统一应用这些窗口。
-已经开始的实验若改变最大窗口，会改变预处理指纹；应改用新的 `ABLATION_ROOT`，例如 `CONFIG.output_root / "ablation_1000ms"`。
-学习率、训练轮数、分支结构等科学参数改变也应使用新输出根目录，避免与旧结果混合。
-以后改进某个分支时，四组依然从同一套配置和模块创建，不能只给某组额外调参后直接归因于组件消融。
+两张GPU分担独立的折/种子任务，每张卡一个进程。建议先运行当前时间分支候选；再把dropout/核宽改回0.5、7/3，另用temporal_control_v1目录运行同样7折×2种子的对照。其他参数和执行策略一致。两组合计28个模型。具体判断方式见README，不把这轮开发筛查当完整论文结果。
 
 ## 模型与损失的约定
 
-`experiments/variants.py` 复用 `model.py` 中的频域/时域编码器、融合空间投影和最终分类头。默认 `t2_conv_execution="native"` 保持原模型执行；可选 split_bias 仅将 d>1 卷积的偏置改为外置广播相加，参数和数学定义不变，但浮点轨迹可能变化。新消融批次应统一使用同一执行模式，并设置独立 `ABLATION_ROOT`，不能在已有批次中切换模式。
+`experiments/variants.py` 复用 `model.py` 中的频域/时域编码器、融合空间投影和最终分类头。新实验内部固定默认split_bias以规避已确认的GPU低效路径，旧快照保留原执行策略。不得在已有批次中更改执行策略或科学参数后继续训练。
 设 `zf`、`zt` 是原融合模块中各自投影后的特征，`C` 是原来的最终线性分类头。
 
 | 组别 | 最终分类路径 | 损失 |
@@ -63,7 +37,7 @@ ABLATION_GROUPS = ("spectral_only",)
 训练采样器使用独立的种子生成器，四组样本顺序相同。不同结构会消耗不同数量的训练随机数，不承诺单分支组的所有 Dropout 掩码逐元素相同。
 
 原分支接口仍为 `(embedding, auxiliary_logits)`。后续分支改进主要修改 `SpectralBranch` 或 `TemporalBranch`；保持该接口即可复用融合、训练与评估。
-辅助权重、Ts、编码深度等仍由原配置控制。
+辅助权重、Ts等仍由config.py控制；论文指定的频域2层、时域3个残差块作为固定实现约定保存。
 
 ## 数据与评估边界
 
@@ -74,18 +48,15 @@ ABLATION_GROUPS = ("spectral_only",)
 ## 输出与恢复
 
 ```text
-results/ablation/
+results/temporal_tuning_v1/
   report.md                  # 当前选择的所有组的训练时间累计及各组报告入口
   comparison.csv
   details/training.lock
-  full/
-  spectral_only/
   temporal_only/
-  equal_fusion/
     report.md
     summary.csv
     details/                 # 配置、源码、数据依据和调度日志
-    window_0500ms/test_S01/seed_42/
+    window_1000ms/test_S01/seed_42/
       report.md
       metrics.json
       training.log
@@ -107,7 +78,7 @@ M=1 时种子间标准差记 NA；报告主表使用跨被试均值 ± 标准差
 真实逐 trial 预测、身份及辅助输出保留在 evaluation.npz，不另存重复预测文件。
 ITR 沿用原公式，500 ms 时选择周期为 0.5 + 0.5 = 1.0 s。
 
-新版实验清单为 v12。v11 四组已验证通过认证后保持 split_bias 路径续训；更早版本已有迁移规则保留，旧模型代码必须通过固定摘要认证、恢复为 native，预处理和科学配置仍须兼容。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。详见 [膨胀卷积改善与数值边界](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
+新版实验清单为 v13，新增内部配置模块归档及校验。v11 四组已验证通过认证后保持 split_bias 路径续训；更早版本已有迁移规则保留，旧模型代码必须通过固定摘要认证、恢复为 native，预处理和科学配置仍须兼容。结果目录不需要搬动。新版源码快照保留包目录，旧文件名按映射校验。详见 [膨胀卷积改善与数值边界](TEMPORAL2_TIMING_AUDIT.zh-CN.md)。
 旧配置缺少 model_variant 时解释为 full，不放宽未知源码变更的校验。
 升级服务器前应先停止旧进程及其子进程，再同步代码，保留结果目录和原配置，以 `python train.py` 继续原完整模型实验。
 原 1000 ms 实验使用原输出路径，消融使用新根目录，不移动旧权重。
