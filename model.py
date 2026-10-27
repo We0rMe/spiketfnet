@@ -2,6 +2,7 @@
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from spikingjelly.activation_based import functional, neuron, surrogate
 
 from config import Config
@@ -104,14 +105,23 @@ class TemporalBranch(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.steps = cfg.simulation_steps
+        self.readout_bins = cfg.temporal_readout_bins
         self.current = nn.Sequential(nn.Conv1d(len(cfg.channels), cfg.temporal_width, cfg.stem_kernel,
                                                padding=cfg.stem_kernel // 2), nn.BatchNorm1d(cfg.temporal_width))
         self.encoder = lif_node(cfg)
         self.dropout = nn.Dropout(cfg.temporal_backbone_dropout)
         self.blocks = nn.Sequential(*(SpikingResidualBlock(cfg, dilation) for dilation in cfg.dilations))
         self.attention = SpikeAttention(cfg)
-        self.embedding = projection(cfg.temporal_width, cfg.embedding_dim, cfg.dropout)
+        self.embedding = projection(cfg.temporal_width * self.readout_bins, cfg.embedding_dim, cfg.dropout)
         self.classifier = nn.Linear(cfg.embedding_dim, cfg.num_classes)
+
+    def pool_features(self, features):
+        if features.shape[-1] < self.readout_bins:
+            raise ValueError("Temporal readout cannot upsample the EEG feature axis")
+        if self.readout_bins == 1:
+            return features.mean(dim=-1)  # 原路径保留，兼容历史模型及随机初始化。
+        # 沿 EEG 时间轴汇总并按位置展开；不合并独立的脉冲仿真步。
+        return F.adaptive_avg_pool1d(features, self.readout_bins).flatten(1)
 
     def forward(self, time):
         current = self.current(time)  # 恒定电流只计算一次，stem BN 也只更新一次。
@@ -119,7 +129,7 @@ class TemporalBranch(nn.Module):
         for _ in range(self.steps):
             spikes = self.dropout(self.encoder(current))
             features = self.attention(self.blocks(spikes))
-            embedding = self.embedding(features.mean(dim=-1))
+            embedding = self.embedding(self.pool_features(features))
             embeddings.append(embedding)
             logits.append(self.classifier(embedding))
         return torch.stack(embeddings).mean(0), torch.stack(logits).mean(0)

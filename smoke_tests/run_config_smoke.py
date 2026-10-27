@@ -22,7 +22,7 @@ import train
 
 
 def main():
-    base = ROOT / "smoke_tests/results/config_check"
+    base = ROOT / "smoke_tests/results/config_check" / CONFIG.experiment_name
     base.mkdir(parents=True, exist_ok=False)
     stream = io.StringIO()
     with redirect_stdout(stream):
@@ -55,7 +55,7 @@ def main():
             else:
                 raise AssertionError("Interruption was not triggered")
         resumed = train.run_experiment(resumed_cfg, selected, purpose="smoke")
-        folders = [run_path(root, 1000, 1, 42) for root in (reference, resumed)]
+        folders = [run_path(root, cfg.windows_ms[0], 1, cfg.seed) for root in (reference, resumed)]
         weights = [torch.load(p / "details/model.pt", weights_only=True) for p in folders]
         for key, value in weights[0].items():
             torch.testing.assert_close(value, weights[1][key], rtol=0, atol=0)
@@ -69,11 +69,14 @@ def main():
             for key, value in saved.items():
                 np.testing.assert_array_equal(archive[key], value)
     report = {"unit_tests_passed": tests.testsRun, "device": "cpu", "data": "S1-S3, block1, 8 trials/subject",
-              "training_epochs": 2, "resume_weights_and_predictions_exact": True,
+              "training_epochs": 2, "window_ms": cfg.windows_ms[0], "resume_weights_and_predictions_exact": True,
               "reevaluation_exact": True, "loso_subjects_disjoint": True,
               "candidate": {key: getattr(CONFIG, key) for key in (
-                  "temporal_dropout", "dropout", "stem_kernel", "residual_kernel", "t2_conv_execution")},
+                  "temporal_dropout", "dropout", "stem_kernel", "residual_kernel", "t2_conv_execution",
+                  "temporal_readout_bins", "simulation_steps")},
               "scope": "software verification only; no evidence of accuracy improvement"}
+    manifest = json.loads((reference / "details/experiment.json").read_text(encoding="utf-8"))
+    report["code_sha256"] = manifest["code_sha256"]
     (base / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2), flush=True)
 

@@ -7,11 +7,11 @@ from utils.configuration import Config, PROJECT_ROOT
 
 CONFIG = Config(
     data_root=Path(r"I:\jjh\SSVEP\data\benchmark"),
-    experiment_name="temporal_tuning_v1",  # 新候选必须使用新目录
-    N=7,  # 依次留出 S1～S7；每折仍由其他全部 34 人训练
+    experiment_name="temporal_readout32_v1_500ms",  # 新结构单独存放，不恢复旧模型
+    N=3,  # 先留出 S1～S3 筛查；每折仍由其他全部 34 人训练
     M=2,  # 每折两个独立种子：42、43
     seed=42,  # 起始种子
-    windows_ms=(1000,),  # 本轮仅验证 1000 ms
+    windows_ms=(500,),  # 对照已有 500 ms 实验的同三折、同两种子
     device="cuda",  # 两张卡各运行一个独立模型
     gpu_ids=(0, 1),  # 可用 GPU 编号
     num_workers=0,  # 数据已在内存；需要时再调整加载进程数
@@ -29,6 +29,7 @@ CONFIG = Config(
     temporal_width=64,  # 时域通道数
     stem_kernel=31,  # 初始时间卷积核：原 7 → 31
     residual_kernel=7,  # 残差时间卷积核：原 3 → 7
+    temporal_readout_bins=32,  # 分类前保留的时间段数；1 为原整段平均，32 为结构探索
     attention_heads=4,  # 必须整除 temporal_width
     embedding_dim=128,  # 分支特征维度
     fusion_dim=128,  # 融合特征维度

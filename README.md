@@ -28,7 +28,9 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 
 先修改 `config.py`。没有命令行参数解析，也不需要额外 YAML/JSON。文件中的 `CONFIG = Config(...)` 是当前实验的唯一参数入口；固定数据属性、预处理规则、LIF 实现约定、绘图和诊断默认值收在 `utils/configuration.py`，仍完整写入实验快照，以便复核和恢复旧实验。
 
-本轮配置是**尚待验证的参数候选**：1000 ms，N=7、M=2（种子42、43），时间分支骨干dropout=0.1，时间卷积核31/7。频谱分支及全部投影头dropout保持0.5；宽度64、辅助损失0.3、仿真4步、Adam学习率0.001、L2 0.001、batch128、100轮保持。没有加入按步BN、源数据校准或32段读出；仍使用原共享BN和全局平均汇总。大核不是作者公开参数，候选组合也不等于已经验证有效。
+本轮检查**分类前的整段平均是否丢失过多时间信息**：500 ms，N=3、M=2（S1–S3，种子42、43），`temporal_readout_bins=32`。每个仿真步将注意力输出沿EEG时间轴汇总为32段，再按位置展开，交给原投影层。设为1即保留原整段平均路径。32段是结构探索，不是作者配置，也不是已验证的最优值；它与仿真步数Ts=4相互独立。
+
+其余沿用上一轮服务器500 ms设置：时间骨干dropout=0.1，投影头dropout=0.5，卷积核31/7、宽度64、辅助损失0.3、Ts=4、Adam学习率0.001、L2 0.001、batch128、100轮。共享BN、预处理和固定末轮测试流程不变，不同时加入归一化校准。
 
 **本轮服务器入口：**
 
@@ -36,13 +38,23 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 python -m experiments.ablation
 ```
 
-默认只运行 `temporal_only`，共14个独立模型，结果在 `results/temporal_tuning_v1/temporal_only/`。时间分支保留融合中的时间投影及最终分类头。`python train.py` 仍运行完整双分支模型，留待下一阶段；不要同时把它写入本轮消融批次目录。
+默认只运行 `temporal_only`，共6个独立模型，结果在 `results/temporal_readout32_v1_500ms/temporal_only/`。时间分支保留融合中的时间投影及最终分类头。`python train.py` 运行完整双分支模型，不是本轮入口。
 
-N仅限制测试折；即使N=1，每折仍用其余34名源被试。先做7折×2种子用于开发筛查；两个种子用于检查初始化波动，7名被试用于检查改善是否只来自个别人，不能保证得到完整35折的结论。
+N仅限制测试折；每折仍用其余34名源被试的8160条试次。3折×2种子用于节省资源的机制筛查，不能给出稳定的35折性能估计。源训练block1的监测只反映已见数据拟合程度；目标被试不参与BN估计、早停或checkpoint选择。这些已反复检查过的被试属于开发范围，后续结论需要另外验证。
 
-为判断新参数的实际价值，建议补一组**同样7折×2种子**的原参数对照：只将 `temporal_dropout=0.5`、`stem_kernel=7`、`residual_kernel=3`，以及 `experiment_name="temporal_control_v1"`。其他设置一致，包括内部固定的split_bias执行策略。两组总计28个模型，双GPU各运行一个独立任务；本轮不同时训练full、spectral_only和equal_fusion。旧单种子或native结果仅作参考，不能代替两个种子的配对对照。
+先复用 `results_server/temporal_tuning_v1_500s/temporal_only/` 中S1–S3、种子42/43的服务器结果作对照，无需重新训练六个旧模型。对应ACC为：
 
-先比较同一被试、同一种子的训练监测ACC及末轮测试ACC/ITR，再按被试平均两个种子的差值。若两个种子的整体改善方向一致、提升覆盖多数被试、训练监测也改善，再扩大验证；若仅训练成绩提高，说明仍需验证分段汇总等结构方案。此次同时改变dropout和核宽，只能判断组合价值，不能分离各因素贡献。这些折一旦用于选择参数，应视为开发结果，不能再称为从未参与选择的最终测试证据。
+| 对照被试 | seed 42 | seed 43 | 种子平均 |
+| --- | ---: | ---: | ---: |
+| S1 | 29.17 | 25.00 | 27.08 |
+| S2 | 14.58 | 22.08 | 18.33 |
+| S3 | 41.25 | 45.83 | 43.54 |
+
+对照汇总为ACC **29.65 ± 10.45%**、ITR **46.07 ± 25.84 bits/min**，先平均每名被试的种子再算跨被试总体标准差。应与该范围比较，不能与旧7折24.73%或论文35折直接比较。保持原服务器、PyTorch/CUDA版本和执行设置；本地CPU的旧模型重评估不替代服务器对照。若环境改变，先在新环境重新训练同范围的1段对照，单独使用新目录。
+
+先检查是否有损失异常或训练监测严重下降，再比较相同被试/种子的末轮训练监测ACC和测试ACC/ITR。若两个种子的总体改善同向，至少2/3被试的种子平均测试ACC改善，且不是靠单个异常结果抬高均值，再考虑扩大范围；若只改善训练监测，说明增加的表达能力尚未转化为跨被试收益。这里只是筛查规则，不是显著性检验或正式性能承诺，不按结果挑选末轮前的模型。
+
+分段后投影层增加253,952个参数，并改变后续层初始化及训练随机数消耗。同种子不是全部初值和Dropout掩码逐位一致的保证。本轮能判断“分段读出这项结构改动是否值得继续”，不能单独证明位置保留是唯一原因；若有效，后续再做容量对照。旧快照缺少读出字段时固定恢复为1；不能用旧模型断点续训32段模型。
 
 数据路径保留当前服务器 `I:\jjh\SSVEP\data\benchmark`；本地数据为 `G:\SSVEP\data\benchmark`。设备仍为 `device="cuda"`、`gpu_ids=(0,1)`；`resume=True` 自动恢复同一候选。本地只做软件冒烟，不启动上述训练。
 
@@ -83,7 +95,7 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 结果位于 `results/<experiment_name>/<组别>/`；各组独立恢复，总表为批次根目录的 `comparison.csv`。单分支保留对应融合投影和最终分类头，等权组使用固定0.5/0.5。详见 [消融说明](docs/ABLATION.zh-CN.md)。
 
-当前清单v13归档内部配置实现并校验其源码。历史快照缺少 `temporal_dropout` 时按旧版共享dropout恢复，绝不继承当前候选0.1。已认证v12及更早升级规则保留；更改dropout或核宽等参数仍要求新目录。旧实验续训须使用旧快照的完整设置，不能直接运行当前候选。
+当前清单v14归档内部配置实现并校验其源码，记录 `temporal_readout_bins`。历史快照缺该字段时恢复为1；缺 `temporal_dropout` 时按旧版共享dropout恢复。已认证v13及更早升级规则保留；更改段数、dropout或核宽等参数要求新目录。旧实验续训须使用旧快照的完整设置，不能直接运行当前候选。
 
 ## 耗时和恢复
 
@@ -180,7 +192,7 @@ refresh_saved_reports(r"G:\SSVEP\SpikeTFNet\results_server\spiketfnet")
 
 ## 本地冒烟
 
-本轮配置改动专用检查：`python smoke_tests/run_config_smoke.py`，检查结果位于 `smoke_tests/results/config_check/report.json`；同时验证旧共享dropout的数值兼容。
+本轮专用检查：`.venv/Scripts/python.exe smoke_tests/run_config_smoke.py`，结果位于 `smoke_tests/results/config_check/<experiment_name>/report.json`。已通过67项检查及500 ms真实小样本训练、中断恢复、重评估；旧整段平均和共享dropout均保留数值兼容。冻结的v13模型只用于兼容检查，不是新训练入口。
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r smoke_tests\requirements.txt

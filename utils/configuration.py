@@ -58,6 +58,7 @@ class Config:
     temporal_width: int = 64  # A：时域通道数
     stem_kernel: int = 7  # A：初始时间卷积；stride 固定为 1
     residual_kernel: int = 3  # A：膨胀时间卷积核
+    temporal_readout_bins: int = 1  # 1 保留论文/历史整段平均；>1 为分段读出的工程扩展
     dilations: tuple = (1, 2, 4)  # 图 2 三块；A：正文示例的膨胀率
     attention_heads: int = 4  # A：脉冲注意力头数
     attention_scale: float = 0.125  # A：式 (16) gamma，不使用 softmax
@@ -127,7 +128,8 @@ class Config:
         if self.model_variant not in ("full", "spectral_only", "temporal_only", "equal_fusion"):
             raise ValueError(f"Unknown model variant: {self.model_variant}")
         integer_fields = ("N", "M", "seed", "epochs", "batch_size", "sampling_rate", "simulation_steps",
-                          "temporal_width", "attention_heads", "spectral_depth", "embedding_dim", "fusion_dim", "gate_hidden_dim")
+                          "temporal_width", "temporal_readout_bins", "attention_heads", "spectral_depth",
+                          "embedding_dim", "fusion_dim", "gate_hidden_dim")
         if any(type(getattr(self, name)) is not int for name in integer_fields):
             raise ValueError("Counts, seeds and dimensions must be integers")
         if len(set(self.subject_ids)) != len(self.subject_ids) or len(self.subject_ids) < 2:
@@ -140,6 +142,8 @@ class Config:
             raise ValueError("windows_ms must be nonempty and unique")
         if any(not isinstance(w, int) or w <= 0 for w in self.windows_ms):
             raise ValueError("Window lengths must be positive integer milliseconds")
+        if not 1 <= self.temporal_readout_bins <= self.samples(min(self.windows_ms)):
+            raise ValueError("temporal_readout_bins must be between 1 and the shortest EEG window's sample count")
         if self.start_sample < 0 or self.start_sample + self.samples(max(self.windows_ms)) > self.raw_samples:
             raise ValueError("Requested windows exceed the stored trial")
         if self.fft_length < self.samples(max(self.windows_ms)):
@@ -197,7 +201,8 @@ class Config:
         defaults = cls()
         # v9 及更早归档没有此字段，不能继承后来手动改过的运行默认值。
         restored = {"t2_conv_execution": values.get("t2_conv_execution", "native"),
-                    "temporal_dropout": values.get("temporal_dropout", None)}
+                    "temporal_dropout": values.get("temporal_dropout", None),
+                    "temporal_readout_bins": values.get("temporal_readout_bins", 1)}
         for key, value in values.items():
             original = getattr(defaults, key)
             restored[key] = Path(value) if isinstance(original, Path) else tuple(value) if isinstance(original, tuple) else value

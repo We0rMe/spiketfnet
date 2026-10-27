@@ -13,6 +13,14 @@ SOURCE_NAMES = (
     "utils/configuration.py",
 )
 
+READOUT_V13_SOURCES = {
+    "model.py": "c96f58f0d39ad3208a19bfcb807188dc173dd411856287db3109197d84f12f40",
+    "train.py": "413663d3bb1f19108552db49b02267422dbace1d1d82a1e89a5c19bf3bbd57e5",
+    "evaluate.py": "6a84a6369bbaf2b3240e5e4bbf68702551abd622aeb7402b98fc70831f4f0a7d",
+    "utils/configuration.py": "85ee61b10ac1caad000a5cd7da369667e775863e50b4cea5e2166d216d53bc69",
+    "utils/provenance.py": "6f33e7188b0754d69c96f8114d7e1a051506d0df0ff25b9c73fe14eb9c2ed66d",
+}
+
 CONFIG_V12_SOURCES = {
     "model.py": "e32b1f874a1e55ae5f6633e711525ad0a89ea0866f56072e246853c89e8332b1",
     "train.py": "73a3bd52a9e6a3f9b2900503e3121a312979578b5210024770d2aae3fafc6eef",
@@ -165,6 +173,10 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
         if previous_hash == code_hashes[current_name]:
             continue
         if verified_line_endings(name, current_name, previous_hash, code_hashes[current_name], details):
+            continue
+        if version == 13 and cfg.temporal_readout_bins == 1 and verified_source_upgrade(
+                name, previous_hash, details, READOUT_V13_SOURCES):
+            print(f"Verified v13 readout upgrade: {name}; original global average preserved.", flush=True)
             continue
         if version <= 12 and verified_source_upgrade(name, previous_hash, details, CONFIG_V12_SOURCES):
             print(f"Verified v{version} configuration upgrade: {name}; saved dropout settings preserved.", flush=True)
