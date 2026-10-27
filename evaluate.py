@@ -16,7 +16,7 @@ from data import WindowDataset, file_sha256, prepare_data
 from experiments.variants import build_model
 from utils.timing import normalize_history
 from utils.branch_timing import timing_markdown, timing_rows, timing_totals
-from utils.provenance import (CONFIG_V12_SOURCES, CONV_EXECUTION_V9_SOURCES, READOUT_V13_SOURCES,
+from utils.provenance import (CONFIG_V12_SOURCES, CONV_EXECUTION_V9_SOURCES, READOUT_V13_SOURCES, POOLING_V14_SOURCES,
                               verified_source_upgrade, verified_line_endings)
 
 
@@ -423,7 +423,10 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
                                                             root / "details", CONFIG_V12_SOURCES))
         known_readout_upgrade = (legacy_readout and verified_source_upgrade(
             "model.py", manifest["code_sha256"]["model.py"], root / "details", READOUT_V13_SOURCES))
-        if not known_native and not same_code and not known_config_upgrade and not known_readout_upgrade:
+        known_pooling_upgrade = (manifest.get("format_version", 1) == 14 and cfg.temporal_readout_bins == 1
+                                 and verified_source_upgrade("model.py", manifest["code_sha256"]["model.py"],
+                                                             root / "details", POOLING_V14_SOURCES))
+        if not any((known_native, same_code, known_config_upgrade, known_readout_upgrade, known_pooling_upgrade)):
             raise ValueError("Model source changed; use the archived source to replay this experiment")
     variant_key = "experiments/variants.py" if manifest.get("format_version", 1) >= 6 else "ablation_model.py"
     if manifest.get("format_version", 1) >= 4 and file_sha256(

@@ -1,7 +1,10 @@
 """源码归档清单与断点兼容校验；仅允许已验证的历史实现升级。"""
 
+import csv
 import hashlib
 from pathlib import Path
+
+import torch
 
 from config import Config
 from data import file_sha256
@@ -12,6 +15,13 @@ SOURCE_NAMES = (
     "utils/__init__.py", "utils/timing.py", "utils/provenance.py", "utils/operator_profile.py", "utils/branch_timing.py",
     "utils/configuration.py",
 )
+
+POOLING_V14_SOURCES = {
+    "model.py": "db62ced31088c9d9fc0bd0c05c4821995343b61d5eac2e80ae367cb2059dafba",
+    "train.py": "fa50f6766e62e7727720df8da7a837f6c83e643c644c6e82639d653def3f24b1",
+    "evaluate.py": "d8a91f2e26e4a6e8d407b57849eefbf7dae48222c90672c618c3f4598fbe1931",
+    "utils/provenance.py": "6d85bbea95b444362e77c10c8373e8588a98869677f69ef88dc7c85f58caca63",
+}
 
 READOUT_V13_SOURCES = {
     "model.py": "c96f58f0d39ad3208a19bfcb807188dc173dd411856287db3109197d84f12f40",
@@ -134,6 +144,26 @@ def verified_source_upgrade(name, old_hash, details, approved):
     return False
 
 
+def pooling_upgrade_allowed(cfg, details):
+    """多段计算顺序已改变，只允许尚未提交训练结果的旧目录升级。"""
+    if cfg.temporal_readout_bins == 1:
+        return True
+    if details is None:
+        return False
+    root = Path(details).parent
+    if any(any(root.rglob(name)) for name in ("model.pt", "evaluation.npz", "metrics.json")):
+        return False
+    for path in root.rglob("history*.csv"):
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            if next(csv.DictReader(handle), None) is not None:
+                return False
+    for path in root.rglob("resume.pt"):
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        if state.get("epoch") != 0 or state.get("history") != [] or state.get("optimizer", {}).get("state") != {}:
+            return False
+    return True
+
+
 def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None):
     previous = Config.from_dict(manifest["config"]).to_dict()
     allowed = {"N", "M", "seed", "windows_ms", "device", "gpu_ids", "evaluation_device", "num_workers",
@@ -167,12 +197,20 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
         raise ValueError("Legacy experiments can only resume as full models")
     if version == 5:
         checked_sources += ("training_timing.py",)
+    pooling_upgrade = None
     for name in checked_sources:
         previous_hash = manifest["code_sha256"][name]
         current_name = LEGACY_SOURCE_PATHS.get(name, name) if version < 6 else name
         if previous_hash == code_hashes[current_name]:
             continue
         if verified_line_endings(name, current_name, previous_hash, code_hashes[current_name], details):
+            continue
+        if version == 14 and verified_source_upgrade(name, previous_hash, details, POOLING_V14_SOURCES):
+            if pooling_upgrade is None:
+                pooling_upgrade = pooling_upgrade_allowed(cfg, details)
+            if not pooling_upgrade:
+                raise ValueError("Pooling execution changed after saved training/results; use a new experiment_name")
+            print(f"Verified v14 pooling fix: {name}; unchanged GAP or initial checkpoint only.", flush=True)
             continue
         if version == 13 and cfg.temporal_readout_bins == 1 and verified_source_upgrade(
                 name, previous_hash, details, READOUT_V13_SOURCES):

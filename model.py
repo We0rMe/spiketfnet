@@ -2,7 +2,6 @@
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 from spikingjelly.activation_based import functional, neuron, surrogate
 
 from config import Config
@@ -120,8 +119,11 @@ class TemporalBranch(nn.Module):
             raise ValueError("Temporal readout cannot upsample the EEG feature axis")
         if self.readout_bins == 1:
             return features.mean(dim=-1)  # 原路径保留，兼容历史模型及随机初始化。
-        # 沿 EEG 时间轴汇总并按位置展开；不合并独立的脉冲仿真步。
-        return F.adaptive_avg_pool1d(features, self.readout_bins).flatten(1)
+        # 使用相同的 floor/ceil 分段，避开 CUDA adaptive pooling 的非确定性反向。
+        length, bins = features.shape[-1], self.readout_bins
+        segments = [features[..., i * length // bins: ((i + 1) * length + bins - 1) // bins].mean(dim=-1)
+                    for i in range(bins)]
+        return torch.stack(segments, dim=-1).flatten(1)
 
     def forward(self, time):
         current = self.current(time)  # 恒定电流只计算一次，stem BN 也只更新一次。
