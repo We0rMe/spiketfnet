@@ -7,12 +7,12 @@ from utils.configuration import Config, PROJECT_ROOT
 
 CONFIG = Config(
     data_root=Path(r"I:\jjh\SSVEP\data\benchmark"),
-    experiment_name="temporal_readout32_v1_500ms",  # 新结构单独存放，不恢复旧模型
+    experiment_name="temporal_v1_GAP32_500ms",  # 新结构单独存放，不恢复旧模型
     N=3,  # 先留出 S1～S3 筛查；每折仍由其他全部 34 人训练
     M=2,  # 每折两个独立种子：42、43
     seed=42,  # 起始种子
     windows_ms=(500,),  # 对照已有 500 ms 实验的同三折、同两种子
-    device="cuda",  # 两张卡各运行一个独立模型
+    device="cuda:1",  # 两张卡各运行一个独立模型
     gpu_ids=(0, 1),  # 可用 GPU 编号
     num_workers=0,  # 数据已在内存；需要时再调整加载进程数
     cpu_threads=4,  # 每个训练进程的 CPU 线程数
