@@ -7,7 +7,7 @@ from utils.configuration import Config, PROJECT_ROOT
 
 CONFIG = Config(
     data_root=Path(r"I:\jjh\SSVEP\data\benchmark"),
-    experiment_name="temporal_v1_GAP32_500ms",  # 新结构单独存放，不恢复旧模型
+    experiment_name="full_v1_GAP32_500ms",  # 新结构单独存放，不恢复旧模型
     N=3,  # 先留出 S1～S3 筛查；每折仍由其他全部 34 人训练
     M=2,  # 每折两个独立种子：42、43
     seed=42,  # 起始种子
@@ -38,7 +38,7 @@ CONFIG = Config(
 
 # python -m experiments.ablation。
 # 可选组：full / spectral_only / temporal_only / equal_fusion。
-ABLATION_GROUPS = ("temporal_only",)
+ABLATION_GROUPS = ("full", )
 ABLATION_CONFIG = replace(
     CONFIG,
     output_root=CONFIG.output_root / CONFIG.experiment_name,
