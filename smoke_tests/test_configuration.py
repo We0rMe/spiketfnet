@@ -26,7 +26,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_candidate_scope_and_snapshot_roundtrip(self):
         CONFIG.validate()
         self.assertEqual((CONFIG.N, CONFIG.M, CONFIG.seeds), (3, 2, (42, 43)))
-        self.assertEqual(ABLATION_GROUPS, ("temporal_only",))
+        self.assertEqual(ABLATION_GROUPS, ("spectral_only", "equal_fusion"))
         self.assertEqual(ABLATION_CONFIG.windows_ms, (500,))
         self.assertEqual(CONFIG.temporal_readout_bins, 32)
         self.assertEqual(len(CONFIG.subject_ids), 35)

@@ -28,35 +28,27 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 
 先修改 `config.py`。没有命令行参数解析，也不需要额外 YAML/JSON。文件中的 `CONFIG = Config(...)` 是当前实验的唯一参数入口；固定数据属性、预处理规则、LIF 实现约定、绘图和诊断默认值收在 `utils/configuration.py`，仍完整写入实验快照，以便复核和恢复旧实验。
 
-本轮检查**分类前的整段平均是否丢失过多时间信息**：500 ms，N=3、M=2（S1–S3，种子42、43），`temporal_readout_bins=32`。每个仿真步将注意力输出沿EEG时间轴汇总为32段，再按位置展开，交给原投影层。设为1即保留原整段平均路径。32段是结构探索，不是作者配置，也不是已验证的最优值；它与仿真步数Ts=4相互独立。
+本轮检查**32段时间分支变强后，联合训练的融合方式是否损害了跨被试表现**。冻结现有科学参数，仅运行两组：`spectral_only` 和 `equal_fusion`。窗口500 ms，N=3、M=2（S1–S3，种子42、43），每组6模型，共12模型。
 
-其余沿用上一轮服务器500 ms设置：时间骨干dropout=0.1，投影头dropout=0.5，卷积核31/7、宽度64、辅助损失0.3、Ts=4、Adam学习率0.001、L2 0.001、batch128、100轮。共享BN、预处理和固定末轮测试流程不变，不同时加入归一化校准。
+`equal_fusion` 从训练开始固定使用 `0.5*zf + 0.5*zt`，删除自适应门控；保留两分支、融合投影、最终分类头和两项辅助损失。它使用现成消融实现，从头联合训练，不加载旧模型，不是在测试时临时改权重。
 
-**本轮服务器入口：**
+两个新组都使用 `temporal_readout_bins=32`。频域单分支最终结构不含时间分支，但当前构建流程先初始化完整模型，再删除组件：段数会影响后续融合投影/分类头的初值和训练随机数状态。因此补一组32段配置下的单频域模型，作为匹配初始化过程的对照；不宣称它的结构增加了时间信息。
+
+其他参数不变：时间骨干dropout=0.1、头dropout=0.5、核31/7、宽度64、辅助损失各0.3、Ts=4、Adam学习率0.001、L2 0.001、batch128、100轮。共享BN、预处理及固定末轮评估不变。每折仍使用其他全部34名源被试的8160条试次。
+
+**服务器入口：**
 
 ```bash
 python -m experiments.ablation
 ```
 
-默认只运行 `temporal_only`，共6个独立模型，当前结果在 `results/temporal_v1_GAP32_500ms/temporal_only/`。时间分支保留融合中的时间投影及最终分类头。`python train.py` 运行完整双分支模型，不是本轮入口。
+结果目录为 `results/fusion_control_v1_GAP32_500ms/`，下面分别是 `spectral_only/` 和 `equal_fusion/`。现有五组结果全部保留，不重跑。`python train.py` 会运行自适应门控的完整模型，不是本轮入口。
 
-N仅限制测试折；每折仍用其余34名源被试的8160条试次。3折×2种子用于节省资源的机制筛查，不能给出稳定的35折性能估计。源训练block1的监测只反映已见数据拟合程度；目标被试不参与BN估计、早停或checkpoint选择。这些已反复检查过的被试属于开发范围，后续结论需要另外验证。
+配对对照均取S1–S3、种子42/43。原时间1段组的同范围ACC为29.65%，不能使用其7折汇总24.73%；时间32段53.82%，完整1段73.12%，完整32段64.44%，已有单频域75.56%。完整32段模型的频谱辅助头仍有78.26%，且六个模型均高于各自的融合结果，说明主要问题已转向融合后的表示和分类路径。详细证据与固定权重诊断见 [融合审查](smoke_tests/fusion_audit/results/report.md)。
 
-先复用 `results_server/temporal_tuning_v1_500s/temporal_only/` 中S1–S3、种子42/43的服务器结果作对照，无需重新训练六个旧模型。对应ACC为：
+下一轮先比较等权组与已有完整32段组的同折/同种子结果，再与新单频域组比较。等权明显回升说明训练中的门控分配值得继续改进；回升但未超过单频域不算获得融合收益；若仍差，则转向分支监督、共享分类头及表征配合，不继续盲目扫时间核宽或训练轮数。3折只能做开发筛查，不据此声称匹配论文35折性能；不按目标成绩选checkpoint。
 
-| 对照被试 | seed 42 | seed 43 | 种子平均 |
-| --- | ---: | ---: | ---: |
-| S1 | 29.17 | 25.00 | 27.08 |
-| S2 | 14.58 | 22.08 | 18.33 |
-| S3 | 41.25 | 45.83 | 43.54 |
-
-对照汇总为ACC **29.65 ± 10.45%**、ITR **46.07 ± 25.84 bits/min**，先平均每名被试的种子再算跨被试总体标准差。应与该范围比较，不能与旧7折24.73%或论文35折直接比较。保持原服务器、PyTorch/CUDA版本和执行设置；本地CPU的旧模型重评估不替代服务器对照。若环境改变，先在新环境重新训练同范围的1段对照，单独使用新目录。
-
-先检查是否有损失异常或训练监测严重下降，再比较相同被试/种子的末轮训练监测ACC和测试ACC/ITR。若两个种子的总体改善同向，至少2/3被试的种子平均测试ACC改善，且不是靠单个异常结果抬高均值，再考虑扩大范围；若只改善训练监测，说明增加的表达能力尚未转化为跨被试收益。这里只是筛查规则，不是显著性检验或正式性能承诺，不按结果挑选末轮前的模型。
-
-分段后投影层增加253,952个参数，并改变后续层初始化及训练随机数消耗。同种子不是全部初值和Dropout掩码逐位一致的保证。本轮能判断“分段读出这项结构改动是否值得继续”，不能单独证明位置保留是唯一原因；若有效，后续再做容量对照。旧快照缺少读出字段时固定恢复为1；不能用旧模型断点续训32段模型。
-
-数据路径保留当前服务器 `I:\jjh\SSVEP\data\benchmark`；本地数据为 `G:\SSVEP\data\benchmark`。当前用户配置为 `device="cuda:1"`，六个任务在第1号卡顺序运行；设为 `cuda` 才由 `gpu_ids=(0,1)` 调度两张卡。`resume=True` 自动恢复同一候选。本地只做软件冒烟，不启动上述训练。
+数据路径保留服务器 `I:\jjh\SSVEP\data\benchmark`，本地为 `G:\SSVEP\data\benchmark`。沿用 `device="cuda:1"`，12个模型在该卡顺序执行；改为 `cuda` 才由 `gpu_ids=(0,1)` 分担独立模型。`resume=True` 恢复本轮新目录中的任务。本地仅进行软件冒烟。
 
 服务器建议 Python 3.9–3.12（本地已测试 3.12）。`requirements.txt` 固定 PyTorch 2.5.1 / torchvision 0.20.1 的 CUDA 12.1 构建，需要兼容的 NVIDIA 驱动。构建对应关系见 [PyTorch 官方历史版本说明](https://pytorch.org/get-started/previous-versions/)。Linux 服务器安装和启动：
 
@@ -192,9 +184,9 @@ refresh_saved_reports(r"G:\SSVEP\SpikeTFNet\results_server\spiketfnet")
 
 ## 本地冒烟
 
-本轮CPU检查：`.venv/Scripts/python.exe smoke_tests/run_config_smoke.py`，结果位于 `smoke_tests/results/config_check/<experiment_name>/report.json`；覆盖分段输出/梯度等价、真实小样本训练、失败第0轮升级重试、中断恢复及重评估。冻结的旧模型只用于兼容检查，不是新训练入口。
+本轮CPU检查：`.venv/Scripts/python.exe smoke_tests/run_config_smoke.py`，结果位于 `smoke_tests/results/config_check/<experiment_name>/report.json`；71项检查及当前两个组的真实小样本训练、中断恢复、重评估通过。脚本跟随ABLATION_GROUPS逐组验证。冻结的旧模型只用于兼容检查，不是新训练入口。
 
-本次CUDA修复同步到服务器后，先运行 `python smoke_tests/run_cuda_readout_smoke.py`。无需EEG文件；保持严格确定性，按config.py选定GPU检查分段前向/反向、完整时间分支两次参数更新及重复运行一致性；结果覆盖写入 `smoke_tests/results/cuda_readout_check/report.json`。显示PASS后再执行 `python -m experiments.ablation`。CPU不能代替该检查。
+分段读出的CUDA修复已用于本轮服务器结果。需要在新环境复核时，可运行 `python smoke_tests/run_cuda_readout_smoke.py`：无需EEG文件，按config.py选定GPU检查严格确定性下的前向/反向、参数更新及重复运行一致性。结果位于 `smoke_tests/results/cuda_readout_check/report.json`；CPU不能代替该设备检查。
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r smoke_tests\requirements.txt

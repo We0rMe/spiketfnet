@@ -65,6 +65,21 @@ class AblationTests(unittest.TestCase):
             torch.testing.assert_close(actual[key], reference[key], rtol=0, atol=0)
         self.assertNotIn("gate", actual)
 
+    def test_spectral_control_readout_changes_only_downstream_initialization(self):
+        models, states = [], []
+        for bins in (1, 32):
+            cfg = replace(self.cfg, model_variant="spectral_only", temporal_readout_bins=bins)
+            seed_everything(42, cfg)
+            models.append(build_model(cfg).state_dict())
+            states.append(torch.get_rng_state())
+        self.assertEqual(models[0].keys(), models[1].keys())
+        for name in models[0]:
+            if name.startswith("spectral."):
+                torch.testing.assert_close(models[0][name], models[1][name], rtol=0, atol=0)
+        self.assertFalse(torch.equal(models[0]["fusion.spectral.0.weight"], models[1]["fusion.spectral.0.weight"]))
+        self.assertFalse(torch.equal(models[0]["fusion.classifier.weight"], models[1]["fusion.classifier.weight"]))
+        self.assertFalse(torch.equal(states[0], states[1]))
+
     def test_single_branch_preserves_projection_and_final_classifier(self):
         for variant, branch in (("spectral_only", "spectral"), ("temporal_only", "temporal")):
             model = build_model(replace(self.cfg, model_variant=variant)).eval()

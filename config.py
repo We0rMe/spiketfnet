@@ -7,12 +7,12 @@ from utils.configuration import Config, PROJECT_ROOT
 
 CONFIG = Config(
     data_root=Path(r"I:\jjh\SSVEP\data\benchmark"),
-    experiment_name="full-spectral_v1_500ms",  # 新结构单独存放，不恢复旧模型
+    experiment_name="equal_spectral_v1_GAP32_500ms",  # 固定等权融合及匹配初始化的频域对照
     N=3,  # 先留出 S1～S3 筛查；每折仍由其他全部 34 人训练
     M=2,  # 每折两个独立种子：42、43
     seed=42,  # 起始种子
     windows_ms=(500,),  # 对照已有 500 ms 实验的同三折、同两种子
-    device="cuda:1",  # 两张卡各运行一个独立模型
+    device="cuda:1",  # 沿用当前单卡；改为 cuda 时由 gpu_ids 中两卡分担独立模型
     gpu_ids=(0, 1),  # 可用 GPU 编号
     num_workers=0,  # 数据已在内存；需要时再调整加载进程数
     cpu_threads=4,  # 每个训练进程的 CPU 线程数
@@ -29,7 +29,7 @@ CONFIG = Config(
     temporal_width=64,  # 时域通道数
     stem_kernel=31,  # 初始时间卷积核：原 7 → 31
     residual_kernel=7,  # 残差时间卷积核：原 3 → 7
-    temporal_readout_bins=1,  # 分类前保留的时间段数；1 为原整段平均，32 为结构探索
+    temporal_readout_bins=32,  # 沿用已验证的分段读出；本轮只检查融合方式
     attention_heads=4,  # 必须整除 temporal_width
     embedding_dim=128,  # 分支特征维度
     fusion_dim=128,  # 融合特征维度
@@ -38,7 +38,7 @@ CONFIG = Config(
 
 # python -m experiments.ablation。
 # 可选组：full / spectral_only / temporal_only / equal_fusion。
-ABLATION_GROUPS = ("full", "spectral_only", )
+ABLATION_GROUPS = ("spectral_only", "equal_fusion")
 ABLATION_CONFIG = replace(
     CONFIG,
     output_root=CONFIG.output_root / CONFIG.experiment_name,

@@ -1,10 +1,10 @@
 # SpikeTFNet 消融实验
 
-仅使用Benchmark 40类数据。当前为时间分支读出结构验证：500 ms、3折、每折种子42和43、100 epochs，共6个独立模型。每折仍由其余34名被试的全部试次训练。
+仅使用Benchmark 40类数据。当前为融合方式验证：500 ms、3折、每折种子42和43、100 epochs；单频域和固定等权融合两组，共12个独立模型。每折仍由其余34名被试的全部试次训练。
 
 ## 配置与运行
 
-唯一日常入口为 `config.py`：`CONFIG` 设置窗口、N/M/seed、超参数及设备，`ABLATION_GROUPS=("temporal_only",)` 设置当前组别。另可选full / spectral_only / equal_fusion。模型变体字段与派生配置由程序自动维护。
+唯一日常入口为 `config.py`：`CONFIG` 设置窗口、N/M/seed、超参数及设备，`ABLATION_GROUPS=("spectral_only", "equal_fusion")` 设置当前组别。另可选full / temporal_only。模型变体字段与派生配置由程序自动维护。
 
 ```bash
 python -m experiments.ablation
@@ -12,7 +12,7 @@ python -m experiments.ablation
 
 窗口直接继承 `CONFIG.windows_ms`，批次目录为 `results/<experiment_name>/`，无需重复配置窗口或根目录。更换参数时更换experiment_name；若复用已存在目录，程序会检查配置、源码与数据一致性。
 
-两张GPU分担独立的折/种子任务，每张卡一个进程。只改变 `temporal_readout_bins`：1是原整段平均，32是本轮按时间顺序展开的分段读出。其余科学设置沿用上一轮500 ms；复用旧服务器同三折、同两种子的结果作对照，不重跑旧组。范围、对照数值及判断规则见README，不把开发筛查当完整论文结果。
+沿用当前cuda:1单卡设置；改为cuda可由gpu_ids中的两张卡分担独立任务。两组均保持32段配置及其他科学参数，仅按既有变体规则移除组件。等权融合从训练开始固定0.5，单频域组用于匹配32段配置带来的初始化与随机数消耗。旧完整32段的六个模型直接作为门控对照，不重跑。范围、证据及判断规则见README，不把开发筛查当完整论文结果。
 
 ## 模型与损失的约定
 
@@ -48,11 +48,11 @@ python -m experiments.ablation
 ## 输出与恢复
 
 ```text
-results/temporal_v1_GAP32_500ms/
+results/fusion_control_v1_GAP32_500ms/
   report.md                  # 当前选择的所有组的训练时间累计及各组报告入口
   comparison.csv
   details/training.lock
-  temporal_only/
+  equal_fusion/              # spectral_only/具有相同的结果布局
     report.md
     summary.csv
     details/                 # 配置、源码、数据依据和调度日志
