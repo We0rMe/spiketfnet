@@ -28,13 +28,16 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 
 先修改 `config.py`。没有命令行参数解析，也不需要额外 YAML/JSON。文件中的 `CONFIG = Config(...)` 是当前实验的唯一参数入口；固定数据属性、预处理规则、LIF 实现约定、绘图和诊断默认值收在 `utils/configuration.py`，仍完整写入实验快照，以便复核和恢复旧实验。
 
-本轮检查**32段时间分支变强后，联合训练的融合方式是否损害了跨被试表现**。冻结现有科学参数，仅运行两组：`spectral_only` 和 `equal_fusion`。窗口500 ms，N=3、M=2（S1–S3，种子42、43），每组6模型，共12模型。
+最新等权对照已完成：同样的S1–S3、种子42/43、500 ms，单频域76.18±12.62%，完整门控64.44±15.08%，固定等权60.83±18.43%。等权模型的频谱辅助头仍为78.19%，源训练子集最终ACC为99.80%。移除门控没有解决问题，下一步检查实际进入融合的分类路径是否缺少直接监督。
 
-`equal_fusion` 从训练开始固定使用 `0.5*zf + 0.5*zt`，删除自适应门控；保留两分支、融合投影、最终分类头和两项辅助损失。它使用现成消融实现，从头联合训练，不加载旧模型，不是在测试时临时改权重。
+当前配置仅运行 `equal_supervised` 一组：500 ms、N=3、M=2（种子42、43），共6个新模型。保留等权模型的全部参数、初始化、Dropout、原辅助分类头和原损失，在两个融合投影后复用最终分类层，增加两项分类损失：
 
-两个新组都使用 `temporal_readout_bins=32`。频域单分支最终结构不含时间分支，但当前构建流程先初始化完整模型，再删除组件：段数会影响后续融合投影/分类头的初值和训练随机数状态。因此补一组32段配置下的单频域模型，作为匹配初始化过程的对照；不宣称它的结构增加了时间信息。
+```text
+原损失 = CE(C(0.5*zf+0.5*zt)) + 0.3*CE(频谱辅助输出) + 0.3*CE(时间辅助输出)
+新损失 = 原损失 + lambda_fusion_branch * [CE(C(zf)) + CE(C(zt))]
+```
 
-其他参数不变：时间骨干dropout=0.1、头dropout=0.5、核31/7、宽度64、辅助损失各0.3、Ts=4、Adam学习率0.001、L2 0.001、batch128、100轮。共享BN、预处理及固定末轮评估不变。每折仍使用其他全部34名源被试的8160条试次。
+`lambda_fusion_branch=0.3`，两项各为0.3；仅 `equal_supervised` 使用，旧快照缺字段恢复为0。前向预测仍是原等权结果，没有新增分类层、可学习参数或随机操作。它是独立的工程诊断实验，不是论文指定方法；不保证跨被试提升。源训练S35的固定权重检查表明：原等权模型频谱辅助头93.89%，频谱经最终路径64.51%，时间经最终路径99.51%；这支持检查训练依赖时间侧的解释，但单个源被试不代表全部训练数据。
 
 **服务器入口：**
 
@@ -42,13 +45,11 @@ PyTorch + SpikingJelly 实现，使用 40 类 Benchmark 数据做跨被试 LOSO�
 python -m experiments.ablation
 ```
 
-结果目录为 `results/fusion_control_v1_GAP32_500ms/`，下面分别是 `spectral_only/` 和 `equal_fusion/`。现有五组结果全部保留，不重跑。`python train.py` 会运行自适应门控的完整模型，不是本轮入口。
+输出 `results/equal_supervised_v1_GAP32_500ms/equal_supervised/`。沿用 `device="cuda:1"`；其他超参数保持32段、时间骨干dropout=0.1、头dropout=0.5、核31/7、宽度64、Ts=4、Adam学习率0.001、L2 0.001、batch128、100轮。每折仍由其他34名被试的8160条试次训练，固定末轮测试。`python train.py` 会运行原门控模型，不是本轮入口。
 
-配对对照均取S1–S3、种子42/43。原时间1段组的同范围ACC为29.65%，不能使用其7折汇总24.73%；时间32段53.82%，完整1段73.12%，完整32段64.44%，已有单频域75.56%。完整32段模型的频谱辅助头仍有78.26%，且六个模型均高于各自的融合结果，说明主要问题已转向融合后的表示和分类路径。详细证据与固定权重诊断见 [融合审查](smoke_tests/fusion_audit/results/report.md)。
+已有等权和匹配单频域结果继续作对照，不重跑。先检查新模型的频谱融合路径是否改善，再比较最终ACC；只超过60.83%属于部分改善，只有优于匹配单频域76.18%才支持融合增益。三折是反复使用的开发范围，最终方案还需扩大被试验证。详细结果与局限集中在 [融合审查报告](smoke_tests/fusion_audit/results/report.md)。
 
-下一轮先比较等权组与已有完整32段组的同折/同种子结果，再与新单频域组比较。等权明显回升说明训练中的门控分配值得继续改进；回升但未超过单频域不算获得融合收益；若仍差，则转向分支监督、共享分类头及表征配合，不继续盲目扫时间核宽或训练轮数。3折只能做开发筛查，不据此声称匹配论文35折性能；不按目标成绩选checkpoint。
-
-数据路径保留服务器 `I:\jjh\SSVEP\data\benchmark`，本地为 `G:\SSVEP\data\benchmark`。沿用 `device="cuda:1"`，12个模型在该卡顺序执行；改为 `cuda` 才由 `gpu_ids=(0,1)` 分担独立模型。`resume=True` 恢复本轮新目录中的任务。本地仅进行软件冒烟。
+新路径输出保存在原 `details/evaluation.npz` 中，不增加根目录结果文件。数据路径保留服务器 `I:\jjh\SSVEP\data\benchmark`，本地为 `G:\SSVEP\data\benchmark`。本地仅做软件冒烟及固定权重诊断。
 
 服务器建议 Python 3.9–3.12（本地已测试 3.12）。`requirements.txt` 固定 PyTorch 2.5.1 / torchvision 0.20.1 的 CUDA 12.1 构建，需要兼容的 NVIDIA 驱动。构建对应关系见 [PyTorch 官方历史版本说明](https://pytorch.org/get-started/previous-versions/)。Linux 服务器安装和启动：
 
@@ -66,8 +67,8 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 | 配置 | 运行方式 |
 | --- | --- |
 | `device="auto", gpu_ids=(0, 1)` | 使用池中可见的 GPU；一张卡时单卡，没有 CUDA 时 CPU |
-| `device="cuda", gpu_ids=(0, 1)`（当前配置） | 要求两张卡均可用，否则报错 |
-| `device="cuda:1"` | 仅使用编号 1 的卡；此时忽略 GPU 池 |
+| `device="cuda", gpu_ids=(0, 1)` | 要求两张卡均可用，否则报错 |
+| `device="cuda:1"`（当前配置） | 仅使用编号 1 的卡；此时忽略 GPU 池 |
 | `device="cpu"` | CPU 串行训练 |
 | `evaluation_device="auto"/"cpu"/"cuda:0"/"cuda:1"` | 控制单独启动的 `evaluate.py`，一次用一张卡 |
 
@@ -83,11 +84,11 @@ Windows 服务器将激活命令换为 `.\.venv\Scripts\Activate.ps1`，其余�
 
 ## 消融实验
 
-`python -m experiments.ablation` 读取 `config.py` 的 `ABLATION_GROUPS`；当前只选时间分支。窗口直接使用 `CONFIG.windows_ms`，不再重复定义 `ABLATION_WINDOWS_MS`；批次路径由 `CONFIG.experiment_name` 派生，不再维护 `ABLATION_ROOT`。N/M/seed和其他参数同样直接继承。可选full / spectral_only / temporal_only / equal_fusion。
+`python -m experiments.ablation` 读取 `config.py` 的 `ABLATION_GROUPS`；当前只选 equal_supervised。窗口直接使用 `CONFIG.windows_ms`，不再重复定义 `ABLATION_WINDOWS_MS`；批次路径由 `CONFIG.experiment_name` 派生，不再维护 `ABLATION_ROOT`。N/M/seed和其他参数同样直接继承。可选full / spectral_only / temporal_only / equal_fusion / equal_supervised。
 
 结果位于 `results/<experiment_name>/<组别>/`；各组独立恢复，总表为批次根目录的 `comparison.csv`。单分支保留对应融合投影和最终分类头，等权组使用固定0.5/0.5。详见 [消融说明](docs/ABLATION.zh-CN.md)。
 
-当前清单v15记录确定性分段平均实现。v14的CUDA自适应平均池化反向不支持严格确定性；现按同样的floor/ceil边界逐段求平均，保持32段、参数量及确定性设置。浮点归约次序可不同，不承诺与旧多段实现逐位一致。已认证v14多段实验只有空历史、第0轮断点、空优化器状态且无末轮模型/测试结果时允许原目录重试；已有完成训练的多段实验需新目录。1段路径未变，旧快照缺读出字段仍恢复为1；其余已认证历史升级规则保留。
+当前清单v16增加融合路径监督实验；原四种变体保持原路径，历史升级需认证归档源码。v15记录确定性分段平均实现。v14的CUDA自适应平均池化反向不支持严格确定性；现按同样的floor/ceil边界逐段求平均，保持32段、参数量及确定性设置。浮点归约次序可不同，不承诺与旧多段实现逐位一致。已认证v14多段实验只有空历史、第0轮断点、空优化器状态且无末轮模型/测试结果时允许原目录重试；已有完成训练的多段实验需新目录。1段路径未变，旧快照缺读出字段仍恢复为1；其余已认证历史升级规则保留。
 
 ## 耗时和恢复
 
@@ -184,7 +185,7 @@ refresh_saved_reports(r"G:\SSVEP\SpikeTFNet\results_server\spiketfnet")
 
 ## 本地冒烟
 
-本轮CPU检查：`.venv/Scripts/python.exe smoke_tests/run_config_smoke.py`，结果位于 `smoke_tests/results/config_check/<experiment_name>/report.json`；71项检查及当前两个组的真实小样本训练、中断恢复、重评估通过。脚本跟随ABLATION_GROUPS逐组验证。冻结的旧模型只用于兼容检查，不是新训练入口。
+本轮CPU检查：`.venv/Scripts/python.exe smoke_tests/run_config_smoke.py`，结果位于 `smoke_tests/results/config_check/<experiment_name>/report.json`；75项检查及新监督组的真实小样本训练、中断恢复、重评估通过。脚本跟随ABLATION_GROUPS逐组验证。冻结的旧模型只用于兼容检查，不是新训练入口。
 
 分段读出的CUDA修复已用于本轮服务器结果。需要在新环境复核时，可运行 `python smoke_tests/run_cuda_readout_smoke.py`：无需EEG文件，按config.py选定GPU检查严格确定性下的前向/反向、参数更新及重复运行一致性。结果位于 `smoke_tests/results/cuda_readout_check/report.json`；CPU不能代替该设备检查。
 

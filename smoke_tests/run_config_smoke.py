@@ -80,7 +80,7 @@ def main():
               "reevaluation_exact": True, "loso_subjects_disjoint": True,
               "candidate": {key: getattr(CONFIG, key) for key in (
                   "temporal_dropout", "dropout", "stem_kernel", "residual_kernel", "t2_conv_execution",
-                  "temporal_readout_bins", "simulation_steps")},
+                  "temporal_readout_bins", "simulation_steps", "lambda_fusion_branch")},
               "scope": "software verification only; no evidence of accuracy improvement"}
     manifest = json.loads((reference / "details/experiment.json").read_text(encoding="utf-8"))
     report["code_sha256"] = manifest["code_sha256"]

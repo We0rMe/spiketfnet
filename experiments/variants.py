@@ -32,13 +32,17 @@ class AblationSpikeTFNet(SpikeTFNet):
                 zf = self.fusion.spectral(hf)
             if hasattr(self, "temporal"):
                 zt = self.fusion.temporal(ht)
-            if self.model_variant == "equal_fusion":
+            if self.model_variant in ("equal_fusion", "equal_supervised"):
                 fused = 0.5 * zf + 0.5 * zt  # 所有 trial/维度共享的不可学习常数。
             elif self.model_variant == "spectral_only":
                 fused = zf
             else:
                 fused = zt
             outputs.update(logits=self.fusion.classifier(fused), embedding=fused)
+            if self.model_variant == "equal_supervised":
+                # 复用同一个最终分类层；不添加参数、不重新采样 Dropout。
+                outputs.update(fusion_spectral_logits=self.fusion.classifier(zf),
+                               fusion_temporal_logits=self.fusion.classifier(zt))
             return outputs
         finally:
             if hasattr(self, "temporal"):
@@ -50,6 +54,13 @@ def build_model(cfg):
 
 
 def joint_loss(outputs, labels, cfg):
+    if cfg.model_variant == "equal_supervised":
+        loss = full_joint_loss(outputs, labels, cfg)
+        if cfg.lambda_fusion_branch:
+            loss = loss + cfg.lambda_fusion_branch * (
+                F.cross_entropy(outputs["fusion_spectral_logits"], labels)
+                + F.cross_entropy(outputs["fusion_temporal_logits"], labels))
+        return loss
     if cfg.model_variant in ("full", "equal_fusion"):
         return full_joint_loss(outputs, labels, cfg)
     loss = F.cross_entropy(outputs["logits"], labels)

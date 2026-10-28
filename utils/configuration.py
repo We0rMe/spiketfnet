@@ -39,6 +39,7 @@ class Config:
     temporal_dropout: Optional[float] = None  # 时域骨干；None 兼容历史全网共享 dropout
     lambda_spectral: float = 0.3  # A：频域辅助 CE 权重
     lambda_temporal: float = 0.3  # A：时域辅助 CE 权重
+    lambda_fusion_branch: float = 0.0  # 工程诊断：每条融合分类路径的额外 CE；仅 equal_supervised 使用
 
     filter_order: int = 4  # P：Butterworth 原型阶数；带通转换后阶数为 8
     band_hz: tuple = (8.0, 64.0)  # P：带通范围
@@ -125,7 +126,7 @@ class Config:
         return self.sampling_rate * window_ms // 1000
 
     def validate(self):
-        if self.model_variant not in ("full", "spectral_only", "temporal_only", "equal_fusion"):
+        if self.model_variant not in ("full", "spectral_only", "temporal_only", "equal_fusion", "equal_supervised"):
             raise ValueError(f"Unknown model variant: {self.model_variant}")
         integer_fields = ("N", "M", "seed", "epochs", "batch_size", "sampling_rate", "simulation_steps",
                           "temporal_width", "temporal_readout_bins", "attention_heads", "spectral_depth",
@@ -154,6 +155,8 @@ class Config:
             raise ValueError("Network dimensions and depth must be positive")
         if self.learning_rate <= 0 or min(self.weight_decay, self.lambda_spectral, self.lambda_temporal) < 0:
             raise ValueError("Invalid optimizer or auxiliary loss settings")
+        if not math.isfinite(self.lambda_fusion_branch) or self.lambda_fusion_branch < 0:
+            raise ValueError("lambda_fusion_branch must be finite and nonnegative")
         if self.cpu_threads < 1 or self.num_workers < 0 or self.gaze_shift_seconds < 0:
             raise ValueError("Invalid runtime or ITR settings")
         if any(type(value) is not bool for value in (self.resume, self.check_gradients, self.time_branches)):

@@ -16,6 +16,15 @@ SOURCE_NAMES = (
     "utils/configuration.py",
 )
 
+FUSION_V15_SOURCES = {
+    "utils/configuration.py": "07587a4b422f52c0e344359ca9483904191d7237f0203e5d915620ed3e11ed72",
+    "experiments/variants.py": "d85a5f6c074f4579f0b949b1920a3bb20b8dd5c0d1542fbb79df3c4b3ef7f80e",
+    "ablation_model.py": "d85a5f6c074f4579f0b949b1920a3bb20b8dd5c0d1542fbb79df3c4b3ef7f80e",
+    "train.py": "6902ac046c593007f3ae649f556f0aecec18fe5cb194631ec3d2bcbb01ecb895",
+    "evaluate.py": "8b48aa6117c30d50055949cc99784841a1ae065ef969e618a1a7b062cf94064a",
+    "utils/provenance.py": "f5cfd48cd06bc7bfbf48cc70122147602fa892cc5f10643714d29fefb6b9a38c",
+}
+
 POOLING_V14_SOURCES = {
     "model.py": "db62ced31088c9d9fc0bd0c05c4821995343b61d5eac2e80ae367cb2059dafba",
     "train.py": "fa50f6766e62e7727720df8da7a837f6c83e643c644c6e82639d653def3f24b1",
@@ -204,6 +213,10 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
         if previous_hash == code_hashes[current_name]:
             continue
         if verified_line_endings(name, current_name, previous_hash, code_hashes[current_name], details):
+            continue
+        if version <= 15 and cfg.model_variant != "equal_supervised" and verified_source_upgrade(
+                name, previous_hash, details, FUSION_V15_SOURCES):
+            print(f"Verified v{version} fusion experiment extension: {name}; original variant unchanged.", flush=True)
             continue
         if version == 14 and verified_source_upgrade(name, previous_hash, details, POOLING_V14_SOURCES):
             if pooling_upgrade is None:

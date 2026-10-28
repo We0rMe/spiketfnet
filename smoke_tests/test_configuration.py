@@ -26,7 +26,8 @@ class ConfigurationTests(unittest.TestCase):
     def test_candidate_scope_and_snapshot_roundtrip(self):
         CONFIG.validate()
         self.assertEqual((CONFIG.N, CONFIG.M, CONFIG.seeds), (3, 2, (42, 43)))
-        self.assertEqual(ABLATION_GROUPS, ("spectral_only", "equal_fusion"))
+        self.assertEqual(ABLATION_GROUPS, ("equal_supervised",))
+        self.assertEqual(CONFIG.lambda_fusion_branch, 0.3)
         self.assertEqual(ABLATION_CONFIG.windows_ms, (500,))
         self.assertEqual(CONFIG.temporal_readout_bins, 32)
         self.assertEqual(len(CONFIG.subject_ids), 35)
@@ -35,10 +36,14 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_legacy_missing_fields_never_inherit_candidate_defaults(self):
         snapshot = Config(dropout=0.2).to_dict()
-        del snapshot["temporal_dropout"], snapshot["t2_conv_execution"]
+        del snapshot["temporal_dropout"], snapshot["t2_conv_execution"], snapshot["lambda_fusion_branch"]
         restored = Config.from_dict(snapshot)
         self.assertEqual(restored.temporal_backbone_dropout, 0.2)
         self.assertEqual(restored.t2_conv_execution, "native")
+        self.assertEqual(restored.lambda_fusion_branch, 0.0)
+        for value in (-0.1, float("inf"), float("nan")):
+            with self.assertRaisesRegex(ValueError, "lambda_fusion_branch"):
+                replace(CONFIG, lambda_fusion_branch=value).validate()
         for value in (-0.1, 1.0, float("nan")):
             with self.assertRaises(ValueError):
                 replace(CONFIG, temporal_dropout=value).validate()

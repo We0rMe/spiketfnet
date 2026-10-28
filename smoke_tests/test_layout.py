@@ -14,12 +14,12 @@ from utils.provenance import (LAYOUT_V5_SOURCES, LEGACY_SOURCE_PATHS, MODULE_TIM
 
 
 class LayoutTests(unittest.TestCase):
-    def test_source_list_contains_real_files_and_preserves_moved_code(self):
+    def test_source_list_contains_real_files_and_authentic_moved_code_fixture(self):
         self.assertEqual(len(SOURCE_NAMES), len(set(SOURCE_NAMES)))
         for name in SOURCE_NAMES:
             self.assertTrue((PROJECT_ROOT / name).is_file(), name)
         expected = {
-            "experiments/variants.py": "d85a5f6c074f4579f0b949b1920a3bb20b8dd5c0d1542fbb79df3c4b3ef7f80e",
+            "smoke_tests/fixtures/v15/variants.py": "d85a5f6c074f4579f0b949b1920a3bb20b8dd5c0d1542fbb79df3c4b3ef7f80e",
         }
         for name, digest in expected.items():
             content = (PROJECT_ROOT / name).read_bytes().replace(b"\r\n", b"\n")

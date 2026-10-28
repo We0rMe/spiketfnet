@@ -17,6 +17,7 @@ from experiments.variants import build_model
 from utils.timing import normalize_history
 from utils.branch_timing import timing_markdown, timing_rows, timing_totals
 from utils.provenance import (CONFIG_V12_SOURCES, CONV_EXECUTION_V9_SOURCES, READOUT_V13_SOURCES, POOLING_V14_SOURCES,
+                              FUSION_V15_SOURCES,
                               verified_source_upgrade, verified_line_endings)
 
 
@@ -259,6 +260,8 @@ def evaluate_model(model, loader, cfg, window_ms, device):
         names.append("temporal_logits")
     if cfg.model_variant == "full":
         names.append("gate")
+    if cfg.model_variant == "equal_supervised":
+        names.extend(("fusion_spectral_logits", "fusion_temporal_logits"))
     collected = {name: [] for name in names}
     recorder = SpikeRecorder(model)
     probes_time, probes_spectrum = [], []
@@ -404,13 +407,15 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
     if device_name is not None:
         cfg = replace(cfg, evaluation_device=device_name)
     legacy_readout = manifest.get("format_version", 1) == 13 and cfg.temporal_readout_bins == 1
+    legacy_fusion = manifest.get("format_version", 1) <= 15 and cfg.model_variant != "equal_supervised"
     if manifest.get("format_version", 1) >= 13:
         name = "utils/configuration.py"
         current_hash = file_sha256(PROJECT_ROOT / name)
         previous_hash = manifest["code_sha256"][name]
         if current_hash != previous_hash and not verified_line_endings(
                 name, name, previous_hash, current_hash, root / "details") and not (
-                legacy_readout and verified_source_upgrade(name, previous_hash, root / "details", READOUT_V13_SOURCES)):
+                legacy_readout and verified_source_upgrade(name, previous_hash, root / "details", READOUT_V13_SOURCES)) and not (
+                legacy_fusion and verified_source_upgrade(name, previous_hash, root / "details", FUSION_V15_SOURCES)):
             raise ValueError("Configuration implementation changed; use the archived source")
     if file_sha256(Path(__file__).with_name("model.py")) != manifest["code_sha256"]["model.py"]:
         known_native = (manifest.get("format_version", 1) <= 9 and cfg.t2_conv_execution == "native"
@@ -432,7 +437,9 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
     if manifest.get("format_version", 1) >= 4 and file_sha256(
             PROJECT_ROOT / "experiments/variants.py") != manifest["code_sha256"][variant_key] and not verified_line_endings(
                 variant_key, "experiments/variants.py", manifest["code_sha256"][variant_key],
-                file_sha256(PROJECT_ROOT / "experiments/variants.py"), root / "details"):
+                file_sha256(PROJECT_ROOT / "experiments/variants.py"), root / "details") and not (
+                legacy_fusion and verified_source_upgrade(variant_key, manifest["code_sha256"][variant_key],
+                                                         root / "details", FUSION_V15_SOURCES)):
         raise ValueError("Ablation model source changed; use the archived source")
     prepared = prepare_data(cfg) if prepared is None else prepared.validate(cfg)
     if prepared.metadata["fingerprint"] != manifest["dataset_fingerprint"]:

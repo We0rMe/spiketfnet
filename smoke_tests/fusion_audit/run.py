@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import sys
+import types
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,7 +19,6 @@ sys.path.insert(0, str(ROOT))
 from config import Config
 from data import channel_indices, complex_spectrum, file_sha256, preprocess_subject
 from evaluate import itr_bits_per_minute, run_path
-from experiments.variants import build_model
 
 GROUPS = {
     "temporal1": "temporal_v1_500ms/temporal_only",
@@ -60,6 +60,15 @@ def authenticated_source(root, manifest, name):
         if path.is_file() and file_sha256(path) == manifest["code_sha256"][name]:
             return path.read_bytes().replace(b"\r\n", b"\n")
     raise AssertionError(f"Source archive not authenticated: {root}/{name}")
+
+
+def archived_builder(root, manifest):
+    for name in ("model.py", "data.py"):
+        assert authenticated_source(root, manifest, name) == (ROOT / name).read_bytes().replace(b"\r\n", b"\n")
+    module = types.ModuleType("archived_audit_variants")
+    exec(compile(authenticated_source(root, manifest, "experiments/variants.py"),
+                 str(root / "details/source/experiments/variants.py"), "exec"), module.__dict__)
+    return module.build_model
 
 
 def saved_evidence():
@@ -165,12 +174,11 @@ def replay(evidence, manifests):
     arrays = {}
     for name in ("full1", "full32"):
         root = ROOT / "results_server" / GROUPS[name]
-        for source in ("model.py", "data.py", "experiments/variants.py"):
-            assert authenticated_source(root, manifests[name], source) == (ROOT / source).read_bytes().replace(b"\r\n", b"\n")
+        builder = archived_builder(root, manifests[name])
         cfg = replace(Config.from_dict(manifests[name]["config"]), device="cpu")
         for subject, seed in JOBS:
             private = run_path(root, 500, subject, seed) / "details"
-            model = build_model(cfg).eval()
+            model = builder(cfg).eval()
             model.load_state_dict(torch.load(private / "model.pt", map_location="cpu", weights_only=True))
             before = state_digest(model)
             captured = {}

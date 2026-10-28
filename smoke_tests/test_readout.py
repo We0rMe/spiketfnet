@@ -188,7 +188,7 @@ class ReadoutTests(unittest.TestCase):
             path.write_text(json.dumps(manifest), encoding="utf-8")
             run_ablation(cfg, ("temporal_only",), prepared, purpose="smoke")
             upgraded = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(upgraded["format_version"], 15)
+            self.assertEqual(upgraded["format_version"], 16)
             self.assertEqual(upgraded["status"], "complete")
             run_ablation(replace(cfg, output_root=root / "fresh"), ("temporal_only",), prepared, purpose="smoke")
             runs = [run_path(p / "temporal_only", 500, 1, cfg.seed) for p in (cfg.output_root, root / "fresh")]
