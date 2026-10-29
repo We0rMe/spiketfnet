@@ -214,6 +214,9 @@ def validate_resume(manifest, cfg, prepared, purpose, code_hashes, details=None)
             continue
         if verified_line_endings(name, current_name, previous_hash, code_hashes[current_name], details):
             continue
+        # 按时间位置的 BN 与旧通道 BN 不是等价重构，不接受历史模型源码升级。
+        if name == "model.py":
+            raise ValueError("Model architecture changed (model.py); use a new experiment_name or the archived source")
         if version <= 15 and cfg.model_variant != "equal_supervised" and verified_source_upgrade(
                 name, previous_hash, details, FUSION_V15_SOURCES):
             print(f"Verified v{version} fusion experiment extension: {name}; original variant unchanged.", flush=True)

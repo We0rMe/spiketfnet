@@ -78,10 +78,15 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(cell(current).item(), 0)
 
     def test_attention_is_unsoftmaxed_token_coincidence(self):
-        cfg = replace(CONFIG, temporal_width=4, attention_heads=2)
+        cfg = replace(CONFIG, temporal_width=4, attention_heads=2, windows_ms=(12,), temporal_readout_bins=1)
         attention = SpikeAttention(cfg)
-        attention.qkv = nn.ModuleList([nn.Identity() for _ in range(3)])
-        attention.attended = nn.Identity()
+        for head, projections in enumerate(attention.qkv):
+            for index in range(3):
+                linear = nn.Linear(4, 2, bias=False)
+                with torch.no_grad():
+                    linear.weight.copy_(torch.eye(4)[head * 2:(head + 1) * 2])
+                projections[index] = linear
+        attention.attended = nn.ModuleList([nn.Identity() for _ in range(2)])
         attention.output = nn.Identity()
         x = torch.tensor([[[1., 0., 1.], [0., 1., 1.], [1., 1., 0.], [0., 0., 1.]]])
         expected = torch.zeros_like(x)
@@ -90,7 +95,7 @@ class CoreTests(unittest.TestCase):
             for i in range(3):
                 for j in range(3):
                     expected[0, head * 2:(head + 1) * 2, i] += cfg.attention_scale * torch.dot(tokens[i], tokens[j]) * tokens[j]
-        torch.testing.assert_close(attention(x), x + expected)
+        torch.testing.assert_close(attention(x), (x + expected).transpose(1, 2))
 
     def test_gate_endpoints_and_three_way_loss(self):
         f, t = torch.randn(2, 4), torch.randn(2, 4)
@@ -107,9 +112,9 @@ class CoreTests(unittest.TestCase):
 
     def test_model_all_windows_and_state_isolation(self):
         seed_everything(42, CONFIG)
-        model = SpikeTFNet(CONFIG).eval()
         with torch.no_grad():
             for window in CONFIG.windows_ms:
+                model = SpikeTFNet(CONFIG, window_ms=window).eval()
                 time = torch.randn(2, 9, CONFIG.samples(window))
                 freq = torch.randn(2, 9, CONFIG.spectral_features)
                 output = model(time, freq)
@@ -117,14 +122,14 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(output["gate"].shape, (2, 128))
                 self.assertTrue(((output["gate"] > 0) & (output["gate"] < 1)).all())
             first = model(time[:1], freq[:1])["logits"]
-            model(torch.randn(3, 9, 125), torch.randn(3, 9, 560))
+            model(torch.randn(3, 9, CONFIG.samples(window)), torch.randn(3, 9, 560))
             second = model(time[:1], freq[:1])["logits"]
             torch.testing.assert_close(first, second, rtol=0, atol=0)
             torch.testing.assert_close(first, model(time, freq)["logits"][:1], rtol=1e-4, atol=1e-5)
 
     def test_real_optimizer_step_and_eval_bn_isolation(self):
         seed_everything(42, CONFIG)
-        model = SpikeTFNet(CONFIG)
+        model = SpikeTFNet(CONFIG, window_ms=500)
         loader = DataLoader(TensorDataset(torch.randn(4, 9, 125), torch.randn(4, 9, 560), torch.tensor([0, 1, 2, 3])), batch_size=4)
         optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG.learning_rate, weight_decay=CONFIG.weight_decay)
         previous = model.fusion.classifier.weight.detach().clone()
@@ -144,8 +149,8 @@ class CoreTests(unittest.TestCase):
     def test_simulation_steps_are_independent_hyperparameter(self):
         cfg_one = replace(CONFIG, simulation_steps=1)
         seed_everything(42, CONFIG)
-        model_one = SpikeTFNet(cfg_one)
-        model_four = SpikeTFNet(CONFIG)
+        model_one = SpikeTFNet(cfg_one, window_ms=500)
+        model_four = SpikeTFNet(CONFIG, window_ms=500)
         model_four.load_state_dict(model_one.state_dict())
         loader = DataLoader(TensorDataset(torch.randn(2, 9, 125), torch.randn(2, 9, 560), torch.tensor([0, 1])), batch_size=2)
         _, one = evaluate_model(model_one, loader, cfg_one, 500, torch.device("cpu"))

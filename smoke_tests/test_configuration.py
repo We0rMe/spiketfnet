@@ -25,7 +25,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_candidate_scope_and_snapshot_roundtrip(self):
         CONFIG.validate()
-        self.assertEqual((CONFIG.N, CONFIG.M, CONFIG.seeds), (3, 2, (42, 43)))
+        self.assertEqual(CONFIG.seeds, tuple(range(CONFIG.seed, CONFIG.seed + CONFIG.M)))
+        self.assertEqual(CONFIG.test_subjects, tuple(range(1, CONFIG.N + 1)))
         self.assertEqual(ABLATION_GROUPS, ("equal_supervised",))
         self.assertEqual(CONFIG.lambda_fusion_branch, 0.3)
         self.assertEqual(ABLATION_CONFIG.windows_ms, (500,))
@@ -55,33 +56,15 @@ class ConfigurationTests(unittest.TestCase):
                 is_backbone = name == "temporal.dropout" or name.startswith("temporal.blocks.")
                 self.assertEqual(module.p, 0.1 if is_backbone else 0.5, name)
 
-    def test_original_dropout_path_matches_v12_forward_backward_and_buffers(self):
+    def test_v12_weights_cannot_load_into_time_position_attention(self):
         spec = importlib.util.spec_from_file_location("v12_model", PROJECT_ROOT / "smoke_tests/fixtures/v12/model.py")
         old = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(old)
-        for execution in ("native", "split_bias"):
-            cfg = Config(device="cpu", t2_conv_execution=execution)
-            seed_everything(42, cfg)
-            reference = old.SpikeTFNet(cfg)
-            seed_everything(42, cfg)
-            current = SpikeTFNet(cfg)
-            time, spectrum = torch.randn(2, 9, 125), torch.randn(2, 9, 560)
-            labels = torch.tensor([1, 3])
-            for training in (True, False):
-                results = []
-                for net in (reference, current):
-                    net.train(training)
-                    net.zero_grad(set_to_none=True)
-                    seed_everything(90, cfg)
-                    result = net(time, spectrum)
-                    joint_loss(result, labels, cfg).backward()
-                    results.append(result)
-                for key in results[0]:
-                    torch.testing.assert_close(results[0][key], results[1][key], rtol=0, atol=0)
-                for name, value in reference.state_dict().items():
-                    torch.testing.assert_close(value, current.state_dict()[name], rtol=0, atol=0)
-                for (_, a), (_, b) in zip(reference.named_parameters(), current.named_parameters()):
-                    torch.testing.assert_close(a.grad, b.grad, rtol=0, atol=0)
+        cfg = replace(CONFIG, device="cpu", windows_ms=(500,))
+        reference = old.SpikeTFNet(cfg)
+        current = SpikeTFNet(cfg)
+        with self.assertRaises(RuntimeError):
+            current.load_state_dict(reference.state_dict(), strict=True)
 
     def test_new_schema_and_dropout_are_guarded_on_resume(self):
         cfg = replace(CONFIG, device="cpu")

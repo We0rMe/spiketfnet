@@ -28,7 +28,7 @@ class AblationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)
-        cls.cfg = replace(CONFIG, device="cpu", evaluation_device="cpu", windows_ms=(500, 1000))
+        cls.cfg = replace(CONFIG, device="cpu", evaluation_device="cpu", windows_ms=(500,))
 
     def test_shared_initialization_and_original_full_model(self):
         seed_everything(42, self.cfg)
@@ -131,8 +131,9 @@ class AblationTests(unittest.TestCase):
                     self.assertEqual(key in arrays, variant == "equal_supervised")
                 self.assertEqual(len(arrays["spike_counts"]) == 0, variant == "spectral_only")
                 self.assertTrue(all(np.isfinite(v) for v in metrics.values()))
+                longer_model = build_model(replace(cfg, windows_ms=(500, 1000)), window_ms=1000).eval()
                 with torch.no_grad():
-                    longer = model(torch.randn(2, 9, 250), spectrum)
+                    longer = longer_model(torch.randn(2, 9, 250), spectrum)
                 self.assertEqual(longer["logits"].shape, (2, 40))
 
     def test_supervision_changes_loss_only_and_zero_weight_recovers_equal_gradients(self):
@@ -239,7 +240,7 @@ class AblationTests(unittest.TestCase):
         results = PROJECT_ROOT / "smoke_tests/results"
         results.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=results) as temp:
-            cfg = replace(self.cfg, N=2, M=2, seed=42, output_root=Path(temp))
+            cfg = replace(self.cfg, N=2, M=2, seed=42, windows_ms=(500, 1000), output_root=Path(temp))
             for window in cfg.windows_ms:
                 for variant, values in (("full", [[10, 30], [50, 70]]),
                                         ("equal_fusion", [[20, 40], [80, 100]])):

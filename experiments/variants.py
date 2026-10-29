@@ -7,9 +7,9 @@ from model import SpikeTFNet, joint_loss as full_joint_loss
 
 
 class AblationSpikeTFNet(SpikeTFNet):
-    def __init__(self, cfg):
+    def __init__(self, cfg, window_ms=None):
         # 先按原顺序初始化，再删除组件，使同种子的公共层初值和 RNG 状态一致。
-        super().__init__(cfg)
+        super().__init__(cfg, window_ms)
         self.model_variant = cfg.model_variant
         if self.model_variant == "full":
             raise ValueError("Use the original SpikeTFNet for the full baseline")
@@ -49,8 +49,8 @@ class AblationSpikeTFNet(SpikeTFNet):
                 functional.reset_net(self.temporal)
 
 
-def build_model(cfg):
-    return SpikeTFNet(cfg) if cfg.model_variant == "full" else AblationSpikeTFNet(cfg)
+def build_model(cfg, window_ms=None):
+    return SpikeTFNet(cfg, window_ms) if cfg.model_variant == "full" else AblationSpikeTFNet(cfg, window_ms)
 
 
 def joint_loss(outputs, labels, cfg):

@@ -15,8 +15,8 @@ MODES = ("final", "spectral_aux", "temporal_aux", "spectral_path", "temporal_pat
 
 
 def main():
-    audit.GROUPS.update(equal32="equal_spectral_v1_GAP32_500ms/equal_fusion",
-                        spectral32="equal_spectral_v1_GAP32_500ms/spectral_only")
+    audit.GROUPS.update(equal32="equal-spectral_v1_GAP32_500ms/equal_fusion",
+                        spectral32="equal-spectral_v1_GAP32_500ms/spectral_only")
     evidence, manifests = audit.saved_evidence()
     evidence["controls"] = {"new_groups": ["equal32", "spectral32"], "replay": []}
     base = manifests["full32"]

@@ -336,7 +336,7 @@ def train_run_logged(cfg, prepared, dataset, job, device, root, purpose, reconst
               "pin_memory": device.type == "cuda", "worker_init_fn": seed_worker}
     train_loader = DataLoader(Subset(dataset, training_rows.tolist()), shuffle=True, generator=generator, **common)
     test_loader = DataLoader(Subset(dataset, test_rows.tolist()), shuffle=False, **common)
-    model = build_model(cfg).to(device)
+    model = build_model(cfg, window_ms=window).to(device)
     provenance["model_parameters"] = model_parameters(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     history = []
@@ -567,7 +567,7 @@ def run_locked_experiment(cfg, prepared, purpose, root, existed):
                 "dataset_fingerprint": prepared.metadata["fingerprint"], "code_sha256": code_hashes,
                 "selected_trial_count": len(prepared.ids), "selection": "final epoch only; no target-dependent selection",
                 "statistics": "Mean +/- standard deviation; ddof from config.variance_ddof; ITR computed per subject/seed first"}
-    manifest.update(format_version=16, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
+    manifest.update(format_version=17, selection_sha256=hashlib.sha256(prepared.ids.tobytes()).hexdigest(),
                     monitoring="Source training block 1 in eval mode; no validation set or test-based selection")
     if previous is not None:
         manifest["created_utc"] = previous["created_utc"]

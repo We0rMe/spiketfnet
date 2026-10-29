@@ -16,8 +16,7 @@ from data import WindowDataset, file_sha256, prepare_data
 from experiments.variants import build_model
 from utils.timing import normalize_history
 from utils.branch_timing import timing_markdown, timing_rows, timing_totals
-from utils.provenance import (CONFIG_V12_SOURCES, CONV_EXECUTION_V9_SOURCES, READOUT_V13_SOURCES, POOLING_V14_SOURCES,
-                              FUSION_V15_SOURCES,
+from utils.provenance import (READOUT_V13_SOURCES, FUSION_V15_SOURCES,
                               verified_source_upgrade, verified_line_endings)
 
 
@@ -418,20 +417,9 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
                 legacy_fusion and verified_source_upgrade(name, previous_hash, root / "details", FUSION_V15_SOURCES)):
             raise ValueError("Configuration implementation changed; use the archived source")
     if file_sha256(Path(__file__).with_name("model.py")) != manifest["code_sha256"]["model.py"]:
-        known_native = (manifest.get("format_version", 1) <= 9 and cfg.t2_conv_execution == "native"
-                        and verified_source_upgrade("model.py", manifest["code_sha256"]["model.py"],
-                                                    root / "details", CONV_EXECUTION_V9_SOURCES))
         same_code = verified_line_endings("model.py", "model.py", manifest["code_sha256"]["model.py"],
                                          file_sha256(Path(__file__).with_name("model.py")), root / "details")
-        known_config_upgrade = (manifest.get("format_version", 1) <= 12
-                                and verified_source_upgrade("model.py", manifest["code_sha256"]["model.py"],
-                                                            root / "details", CONFIG_V12_SOURCES))
-        known_readout_upgrade = (legacy_readout and verified_source_upgrade(
-            "model.py", manifest["code_sha256"]["model.py"], root / "details", READOUT_V13_SOURCES))
-        known_pooling_upgrade = (manifest.get("format_version", 1) == 14 and cfg.temporal_readout_bins == 1
-                                 and verified_source_upgrade("model.py", manifest["code_sha256"]["model.py"],
-                                                             root / "details", POOLING_V14_SOURCES))
-        if not any((known_native, same_code, known_config_upgrade, known_readout_upgrade, known_pooling_upgrade)):
+        if not same_code:
             raise ValueError("Model source changed; use the archived source to replay this experiment")
     variant_key = "experiments/variants.py" if manifest.get("format_version", 1) >= 6 else "ablation_model.py"
     if manifest.get("format_version", 1) >= 4 and file_sha256(
@@ -460,7 +448,7 @@ def reevaluate_experiment(root, prepared=None, data_root=None, device_name=None)
                 rows = np.array([lookup[tuple(identity)] for identity in test_ids])
                 dataset = WindowDataset(prepared, cfg, window, rows)
                 loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
-                model = build_model(cfg).to(device)
+                model = build_model(cfg, window_ms=window).to(device)
                 model.load_state_dict(torch.load(folder / "details" / "model.pt", map_location=device, weights_only=True))
                 metrics, arrays = evaluate_model(model, loader, cfg, window, device)
                 save_evaluation(folder, metrics, arrays, training_ids, test_ids)

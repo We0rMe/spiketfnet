@@ -55,26 +55,24 @@ class ConvExecutionTests(unittest.TestCase):
         legacy.pop("t2_conv_execution")
         self.assertEqual(FutureDefault.from_dict(legacy).t2_conv_execution, "native")
 
-    def test_native_matches_frozen_v9_model_and_rng_exactly(self):
+    def test_native_residual_blocks_still_match_frozen_v9(self):
         spec = importlib.util.spec_from_file_location("v9_model", PROJECT_ROOT / "smoke_tests/fixtures/v9/model.py")
         old = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(old)
         cfg = replace(CONFIG, device="cpu", windows_ms=(500,), t2_conv_execution="native")
-        states, gradients, rngs = [], [], []
+        states, gradients = [], []
         for cls in (old.SpikeTFNet, build_model):
             seed_everything(17, cfg)
             model = cls(cfg)
-            optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
-            output = model(torch.randn(2, 9, 125), torch.randn(2, 9, 560))
-            joint_loss(output, torch.tensor([1, 2]), cfg).backward()
-            gradients.append({k: p.grad.clone() for k, p in model.named_parameters()})
-            optimizer.step()
-            states.append(copy.deepcopy(model.state_dict()))
-            rngs.append(torch.get_rng_state())
+            seed_everything(18, cfg)
+            spikes = torch.randn(2, cfg.temporal_width, 125, requires_grad=True)
+            output = model.temporal.blocks(spikes)
+            output.square().mean().backward()
+            states.append(copy.deepcopy(model.temporal.blocks.state_dict()))
+            gradients.append({k: p.grad.clone() for k, p in model.temporal.blocks.named_parameters()})
         for a, b in ((states[0], states[1]), (gradients[0], gradients[1])):
             for key in a:
                 torch.testing.assert_close(a[key], b[key], rtol=0, atol=0)
-        torch.testing.assert_close(*rngs, rtol=0, atol=0)
 
     def test_all_variants_keep_state_keys_and_only_replace_two_convolutions(self):
         for variant in ("full", "spectral_only", "temporal_only", "equal_fusion"):
@@ -140,7 +138,8 @@ class ConvExecutionTests(unittest.TestCase):
                     path.write_bytes(raw.replace(b"\n", ending))
                     self.assertTrue(verified_source_upgrade(name, file_sha256(path), details, CONV_EXECUTION_V9_SOURCES))
                 old_hashes[name] = file_sha256(path)
-            validate_resume({**manifest, "code_sha256": old_hashes}, CONFIG, prepared, "smoke", hashes, details)
+            with self.assertRaisesRegex(ValueError, "Model architecture changed"):
+                validate_resume({**manifest, "code_sha256": old_hashes}, CONFIG, prepared, "smoke", hashes, details)
             (details / "source/model.py").write_bytes(raw + b"\n# unknown change\n")
             with self.assertRaisesRegex(ValueError, "model.py"):
                 validate_resume({**manifest, "code_sha256": old_hashes}, CONFIG, prepared, "smoke", hashes, details)

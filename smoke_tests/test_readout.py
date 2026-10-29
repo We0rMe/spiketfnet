@@ -41,38 +41,17 @@ class ReadoutTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(CONFIG, windows_ms=(1000, 100), temporal_readout_bins=32).validate()
 
-    def test_v13_gap_initialization_forward_backward_and_rng_are_exact(self):
+    def test_v13_gap_weights_require_archived_attention(self):
         spec = importlib.util.spec_from_file_location("v13_model", PROJECT_ROOT / "smoke_tests/fixtures/v13/model.py")
         old = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(old)
-        cfg = replace(CONFIG, temporal_readout_bins=1, device="cpu")
-        seed_everything(42, cfg)
+        cfg = replace(CONFIG, temporal_readout_bins=1, device="cpu", windows_ms=(500,))
         reference = old.SpikeTFNet(cfg)
-        initial_rng = torch.get_rng_state().clone()
-        seed_everything(42, cfg)
         current = SpikeTFNet(cfg)
-        torch.testing.assert_close(initial_rng, torch.get_rng_state(), rtol=0, atol=0)
-        self.assertEqual(reference.state_dict().keys(), current.state_dict().keys())
-        for name, value in reference.state_dict().items():
-            torch.testing.assert_close(value, current.state_dict()[name], rtol=0, atol=0)
-        time, spectrum = torch.randn(2, 9, 125), torch.randn(2, 9, 560)
-        for training in (True, False):
-            results, rng = [], []
-            for net in (reference, current):
-                net.train(training)
-                net.zero_grad(set_to_none=True)
-                seed_everything(91, cfg)
-                output = net(time, spectrum)
-                full_loss(output, torch.tensor([0, 1]), cfg).backward()
-                results.append(output)
-                rng.append(torch.get_rng_state())
-            for key in results[0]:
-                torch.testing.assert_close(results[0][key], results[1][key], rtol=0, atol=0)
-            for name, value in reference.state_dict().items():
-                torch.testing.assert_close(value, current.state_dict()[name], rtol=0, atol=0)
-            for (name, a), (_, b) in zip(reference.named_parameters(), current.named_parameters()):
-                torch.testing.assert_close(a.grad, b.grad, rtol=0, atol=0, msg=name)
-            torch.testing.assert_close(rng[0], rng[1], rtol=0, atol=0)
+        with self.assertRaises(RuntimeError):
+            current.load_state_dict(reference.state_dict(), strict=True)
+        x = torch.randn(2, cfg.temporal_width, 125, requires_grad=True)
+        torch.testing.assert_close(current.temporal.pool_features(x), x.mean(-1), rtol=0, atol=0)
 
     def test_pool_keeps_time_order_and_never_mixes_channels_or_trials(self):
         branch = TemporalBranch(CONFIG)
@@ -160,7 +139,7 @@ class ReadoutTests(unittest.TestCase):
             self.assertFalse(pooling_upgrade_allowed(CONFIG, None))
             self.assertTrue(pooling_upgrade_allowed(replace(CONFIG, temporal_readout_bins=1), details))
 
-    def test_v14_failed_first_batch_retries_through_ablation_entry(self):
+    def test_v14_even_untrained_model_cannot_upgrade_attention(self):
         folder = PROJECT_ROOT / "smoke_tests/results"
         folder.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=folder) as temp, redirect_stdout(io.StringIO()):
@@ -186,23 +165,14 @@ class ReadoutTests(unittest.TestCase):
             manifest["code_sha256"]["model.py"] = old_hash
             manifest["format_version"] = 14
             path.write_text(json.dumps(manifest), encoding="utf-8")
-            run_ablation(cfg, ("temporal_only",), prepared, purpose="smoke")
-            upgraded = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(upgraded["format_version"], 16)
-            self.assertEqual(upgraded["status"], "complete")
-            run_ablation(replace(cfg, output_root=root / "fresh"), ("temporal_only",), prepared, purpose="smoke")
-            runs = [run_path(p / "temporal_only", 500, 1, cfg.seed) for p in (cfg.output_root, root / "fresh")]
-            weights = [torch.load(p / "details/model.pt", weights_only=True) for p in runs]
-            for name in weights[0]:
-                torch.testing.assert_close(weights[0][name], weights[1][name], rtol=0, atol=0)
-            with np.load(runs[0] / "details/evaluation.npz") as a, np.load(runs[1] / "details/evaluation.npz") as b:
-                np.testing.assert_array_equal(a["logits"], b["logits"])
-            # 已有结果的v14多段模型不允许悄悄改用新计算顺序。
-            blocked = {**upgraded, "format_version": 14,
-                       "code_sha256": {**upgraded["code_sha256"], "model.py": old_hash}}
-            group_cfg = replace(cfg, model_variant="temporal_only", experiment_name="temporal_only")
-            with self.assertRaisesRegex(ValueError, "saved training/results"):
-                validate_resume(blocked, group_cfg, prepared, "smoke", upgraded["code_sha256"], details)
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "Model architecture changed"):
+                run_ablation(cfg, ("temporal_only",), prepared, purpose="smoke")
+            self.assertEqual(path.read_bytes(), before)
+            from evaluate import reevaluate_experiment
+            with self.assertRaisesRegex(ValueError, "Model source changed"):
+                reevaluate_experiment(experiment, prepared=prepared, device_name="cpu")
+
 
     def test_resume_requires_same_readout_and_authentic_legacy_source(self):
         cfg = replace(CONFIG, temporal_readout_bins=1, device="cpu")
@@ -223,7 +193,8 @@ class ReadoutTests(unittest.TestCase):
                         "dataset_fingerprint": "example", "selected_trial_count": 2,
                         "code_sha256": {**hashes, "model.py": old_hash}}
             self.assertTrue(verified_source_upgrade("model.py", old_hash, details, READOUT_V13_SOURCES))
-            validate_resume(manifest, cfg, prepared, "smoke", hashes, details)
+            with self.assertRaisesRegex(ValueError, "Model architecture changed"):
+                validate_resume(manifest, cfg, prepared, "smoke", hashes, details)
             with self.assertRaisesRegex(ValueError, "temporal_readout_bins"):
                 validate_resume(manifest, replace(cfg, temporal_readout_bins=32), prepared, "smoke", hashes, details)
             path.write_bytes(path.read_bytes() + b"\n# unknown modification\n")

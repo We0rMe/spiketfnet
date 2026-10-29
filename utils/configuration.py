@@ -115,6 +115,7 @@ class Config:
 
     @property
     def spectral_features(self):
+    # 时间维度拼接
         lo, hi = (round(f / self.fft_resolution) for f in self.spectrum_hz)
         return 2 * (hi - lo + int(self.include_upper_bin))
 

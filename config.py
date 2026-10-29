@@ -7,8 +7,8 @@ from utils.configuration import Config, PROJECT_ROOT
 
 CONFIG = Config(
     data_root=Path(r"I:\jjh\SSVEP\data\benchmark"),
-    experiment_name="equal_supervised_v1_GAP32_500ms",  # 只增加融合路径监督；已有等权和频域组作对照
-    N=3,  # 先留出 S1～S3 筛查；每折仍由其他全部 34 人训练
+    experiment_name="temporal_v2_500ms",  # 只增加融合路径监督；已有等权和频域组作对照
+    N=7,  # 先留出 S1～S3 筛查；每折仍由其他全部 34 人训练
     M=2,  # 每折两个独立种子：42、43
     seed=42,  # 起始种子
     windows_ms=(500,),  # 对照已有 500 ms 实验的同三折、同两种子
@@ -30,7 +30,7 @@ CONFIG = Config(
     temporal_width=64,  # 时域通道数
     stem_kernel=31,  # 初始时间卷积核：原 7 → 31
     residual_kernel=7,  # 残差时间卷积核：原 3 → 7
-    temporal_readout_bins=32,  # 沿用分段读出；本轮固定等权，只检查训练监督
+    temporal_readout_bins=1,  # 沿用分段读出；本轮固定等权，只检查训练监督
     attention_heads=4,  # 必须整除 temporal_width
     embedding_dim=128,  # 分支特征维度
     fusion_dim=128,  # 融合特征维度
@@ -39,7 +39,7 @@ CONFIG = Config(
 
 # python -m experiments.ablation。
 # 可选组：full / spectral_only / temporal_only / equal_fusion / equal_supervised。
-ABLATION_GROUPS = ("equal_supervised",)
+ABLATION_GROUPS = ("temporal_only",)
 ABLATION_CONFIG = replace(
     CONFIG,
     output_root=CONFIG.output_root / CONFIG.experiment_name,
