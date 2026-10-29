@@ -7,12 +7,12 @@ from utils.configuration import Config, PROJECT_ROOT
 
 CONFIG = Config(
     data_root=Path(r"I:\jjh\SSVEP\data\benchmark"),
-    experiment_name="temporal_v2_GAP32_500ms",  # 只增加融合路径监督；已有等权和频域组作对照
+    experiment_name="full-spectral_v2_GAP32_500ms",  # 只增加融合路径监督；已有等权和频域组作对照
     N=3,  # 先留出 S1～S3 筛查；每折仍由其他全部 34 人训练
     M=2,  # 每折两个独立种子：42、43
     seed=42,  # 起始种子
     windows_ms=(500,),  # 对照已有 500 ms 实验的同三折、同两种子
-    device="cuda:1",  # 沿用当前单卡；改为 cuda 时由 gpu_ids 中两卡分担独立模型
+    device="cuda:0",  # 沿用当前单卡；改为 cuda 时由 gpu_ids 中两卡分担独立模型
     gpu_ids=(0, 1),  # 可用 GPU 编号
     num_workers=0,  # 数据已在内存；需要时再调整加载进程数
     cpu_threads=4,  # 每个训练进程的 CPU 线程数
@@ -39,7 +39,7 @@ CONFIG = Config(
 
 # python -m experiments.ablation。
 # 可选组：full / spectral_only / temporal_only / equal_fusion / equal_supervised。
-ABLATION_GROUPS = ("temporal_only",)
+ABLATION_GROUPS = ("full", "spectral_only", )
 ABLATION_CONFIG = replace(
     CONFIG,
     output_root=CONFIG.output_root / CONFIG.experiment_name,
